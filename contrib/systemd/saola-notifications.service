@@ -1,0 +1,56 @@
+# systemd --user unit for saola-notifications. User-level throughout — this
+# file is installed under ~/.config/systemd/user/ (or, for a distro package,
+# the user-unit search path such as /usr/lib/systemd/user/), never under
+# /etc, and nothing in this repo's install instructions ever runs sudo
+# (AGENTS.md's sudo rule). The Arch package installs this to
+# /usr/lib/systemd/user/ with a static enablement symlink (see
+# contrib/aur/PKGBUILD) — a manual (cargo) install can copy this file to
+# ~/.config/systemd/user/, point ExecStart at your binary (e.g.
+# %h/.cargo/bin/saola-notifications), then `systemctl --user daemon-reload`
+# and `systemctl --user enable --now saola-notifications.service`.
+
+[Unit]
+Description=Saola notifications — daemon, toasts and notification centre
+Documentation=https://github.com/JorDunn/saola-notifications
+# PartOf (not just After=/WantedBy=): stopping or restarting
+# graphical-session.target (e.g. at logout) also stops this unit, so it
+# never outlives the session it exists to protect.
+PartOf=graphical-session.target
+After=graphical-session.target
+# Zero-touch packaging: contrib/aur/PKGBUILD ships a static enablement
+# symlink in /usr/lib/systemd/user/graphical-session.target.wants/, so
+# packaged users never run `systemctl --user enable` — the unit starts with
+# every graphical session, for every user, the moment the package is
+# installed. That symlink is indiscriminate, though: on a machine with a
+# second desktop installed, it would also fire under GNOME/KDE, where this
+# daemon would collide with the resident DE's own notification daemon (mako,
+# dunst, or the DE's own). This line is the gate: start only where the
+# compositor is niri (the value niri's own session sets — checked against
+# the user manager's environment, the same place WAYLAND_DISPLAY lives). A
+# failed condition marks the unit "skipped", not "failed" — it doesn't touch
+# the restart machinery below. If Saola ever sets its own XDG_CURRENT_DESKTOP
+# value, update this line to match it.
+ConditionEnvironment=XDG_CURRENT_DESKTOP=niri
+
+[Service]
+ExecStart=/usr/bin/saola-notifications
+# This daemon's failure mode should be silent absence, not a loud crash
+# (AGENTS.md's no-panic rule) — but Restart=on-failure is the belt for
+# whatever gets through anyway: an absent org.freedesktop.Notifications owner
+# is a severity-1 condition (no toasts, no history, no panel indicator data)
+# worth recovering from automatically rather than leaving dead until the next
+# login.
+Restart=on-failure
+# systemd's own default (100ms) restarts far faster than a lost boot-order
+# race resolves (e.g. the compositor's socket not yet accepting connections)
+# and burns the start-rate limiter's budget in under a second. 2s is slow
+# enough that a handful of retries covers a slow compositor start without
+# spamming the journal.
+RestartSec=2s
+# A lost boot-order race must not exhaust systemd's default start-rate
+# limiter and leave the unit permanently `failed`. Retry forever rather than
+# give up after a handful of fast failures.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=graphical-session.target

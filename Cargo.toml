@@ -1,0 +1,128 @@
+[package]
+name = "saola-notifications"
+version = "0.1.0"
+edition = "2024"
+description = "Notification daemon, toast popups and notification centre for the Saola desktop environment"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JorDunn/saola-notifications"
+
+[dependencies]
+# Survey — 2026-08-17 (Stage 1). Version line and feature set follow
+# AGENTS.md/PLAN.md exactly, cross-checked against the sibling repos:
+# `saola-panel`, `saola-capture`, and `saola-lockscreen` all pin
+# `iced = { version = "0.14", features = ["tokio", "svg", "image", "advanced"] }`
+# — but this crate deliberately swaps the plain `image` feature for
+# `image-without-codecs` (verified in `iced-0.14.0/Cargo.toml`:
+# `image = ["image-without-codecs", "image/default"]`, i.e. plain `image`
+# pulls in *every* codec `image` ships via its own `default` feature —
+# avif/bmp/dds/exr/ff/gif/hdr/ico/jpeg/png/pnm/qoi/tga/tiff/webp, verified in
+# `image-0.25.10/Cargo.toml`'s `default-formats` list — while
+# `image-without-codecs` only pulls `iced_widget/image` (the `image::Handle`/
+# viewer widget machinery `Notification.image` needs, per PLAN.md Stage 4)
+# plus a codec-less `dep:image`). Stage 4's hint parsing needs real PNG
+# decode for the `image-path`/`image_path`/legacy `icon_data` hint aliases
+# (arbitrary file paths a notifying app hands over — the raw `image-data`
+# hint's `iiibiiay` struct is *not* codec-encoded, just a raw RGBA buffer
+# with a rowstride, so it needs no codec at all). Freedesktop icon themes and
+# notifying apps overwhelmingly ship PNG for raster icons (SVG icons are
+# already covered by iced's own `svg` feature below, via resvg); nothing in
+# the frozen contracts or the style guide calls for JPEG/GIF/WebP/etc.
+# decode. So: **yes**, the `image` crate is needed as a direct dependency
+# beyond what `image-without-codecs` alone provides — added below with only
+# the `png` feature (`png = ["dep:png"]`, verified in
+# `image-0.25.10/Cargo.toml`: no extra transitive codec deps beyond the pure-
+# Rust `png` crate itself). `svg`: Lucide icon assets, matching every
+# sibling's own chrome-icon usage. `advanced`: `iced::advanced`, reserved for
+# any custom-widget need the toast/centre surfaces turn out to want (life-
+# rule rings, hover-pause hit-testing) — cheap to keep, matches the sibling
+# convention of enabling it up front rather than threading it in later.
+# `tokio`: the one shared async runtime this daemon and its zbus bridge run
+# on, per AGENTS.md's "never two runtimes" rule. `default-features = false`:
+# this daemon has no windowed/toplevel surface (Architecture: layer-shell
+# overlays only, `iced_layershell::build_pattern::daemon`), so iced's own
+# `default` feature set (`wgpu, tiny-skia, crisp, web-colors, thread-pool,
+# linux-theme-detection, x11, wayland`) is not blanket-appropriate here —
+# instead `wayland` and the rendering backend arrive transitively through
+# `iced_layershell` itself (verified: `iced_layershell` depends on
+# `iced_winit`/`iced_renderer` directly, the same shape `saola-theme`'s own
+# `Cargo.toml` uses when it declares `default-features = false` against a
+# near-identical feature list).
+iced = { version = "0.14", default-features = false, features = [
+    "tokio",
+    "svg",
+    "advanced",
+    "image-without-codecs",
+] }
+# See the `iced` essay above: PNG decode for the `image-path`/`icon_data`
+# hint aliases (Stage 4). `default-features = false` + `png` only — no
+# `rayon` (this crate decodes one small icon at a time, not a batch worth
+# parallelizing) and none of `image`'s other format codecs (unneeded per the
+# essay above; each pulls its own extra dependency — `webp` alone would add
+# `image-webp`, `avif` would add `ravif`+`rgb`, etc. — for formats nothing in
+# the frozen contracts or style guide calls for).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Layer-shell binding for iced, waycrate/exwlshelleventloop, same version
+# line as every sibling with a layer-shell surface (`saola-panel`,
+# `saola-capture`: `iced_layershell = "0.19"`, resolves to 0.19.1). Owns
+# both surface roles per Architecture — `Toasts` and `Centre`, both
+# `Layer::Overlay` — including the respawn-to-resize dance for each.
+iced_layershell = "0.19"
+# `tag` and `version` must move together (cargo errors if they disagree —
+# the footgun-guard every sibling's Cargo.toml documents). Pinned to the
+# tag PLAN.md/AGENTS.md specify, `saola-theme-v0.13.0` (verified live
+# 2026-08-17: `git tag --sort=-v:refname` in the saola-theme checkout lists
+# it, and `git show saola-theme-v0.13.0:crates/saola-theme/Cargo.toml`
+# reports `version = "0.13.0"`, matching below — newer than every other
+# sibling's current pin at `saola-theme-v0.5.0`, since this repo starts
+# after several theme releases landed). Never `branch = "main"` — see
+# AGENTS.md's Design language section.
+saola-theme = { git = "https://github.com/JorDunn/saola-theme", tag = "saola-theme-v0.13.0", version = "0.13.0" }
+# D-Bus. `default-features = false` drops zbus's default `async-io` runtime;
+# `tokio` makes it share the one runtime this crate ever spins up — iced's
+# `tokio` feature builds it, same teaching note as every sibling's
+# Cargo.toml. Serves both frozen interfaces (`org.freedesktop.Notifications`
+# and `io.saola.Notifications1`) and consumes `io.saola.Capture1`'s signals
+# — one connection, one runtime, per AGENTS.md's "never two runtimes" rule.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# `notifications.toml` (Stage 2). Hand-walked over `toml::Table` — never
+# `#[derive(Deserialize)]`, per AGENTS.md's config rule (one bad knob
+# degrades alone with its own precise warning). Pinned to the same `0.9`
+# line every sibling uses (`saola-capture`, `saola-files`, and
+# `saola-theme`'s own `saola-tokens` crate all depend on `toml = "0.9"`) so
+# Cargo unifies to the already-resolved `toml`/`toml_datetime`/`toml_parser`/
+# `winnow` instance already in the dependency tree via `saola-theme`, rather
+# than building a second major version of the same crate. Default features
+# (pulls `serde` for `Table`/`Value`'s own internal (de)serialization — that
+# is `toml`'s implementation detail, not this crate deriving anything).
+toml = "0.9"
+# Logging. `tracing` + `tracing-subscriber` (`fmt` layer, `env-filter`
+# feature for `RUST_LOG`-driven verbosity without a recompile), same pick
+# and version line as `saola-session`'s Cargo.toml (the only other sibling
+# to have made this call so far — `tracing = "0.1"`,
+# `tracing-subscriber = { version = "0.3", features = ["env-filter"] }`).
+# Writes to stderr, which systemd already journals per-unit for the packaged
+# systemd unit (`contrib/systemd/saola-notifications.service`) — no direct
+# journal-socket dependency (`tracing-journald`) needed. No `log` crate:
+# nothing in this dependency tree needs the `log` façade.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Async plumbing for the D-Bus bridge and layershell surfaces —
+# `iced::futures::channel::mpsc::Sender<DaemonEvent>` per Architecture is
+# re-exported from this crate, and Stage 3's zbus worker/`Subscription::run`
+# shape needs `futures::StreamExt`/`SinkExt` directly. Same version line as
+# `saola-files` (`futures = "0.3"`); iced and zbus both already depend on it
+# transitively, so this is a direct declaration of an already-resolved
+# crate, not new weight.
+futures = "0.3"
+
+[profile.dev.package."*"]
+# Same rationale as `saola-capture`'s Cargo.toml (see its dated teaching
+# note): the default dev profile compiles every dependency at opt-level 0,
+# including the PNG decode path on notification hint parsing and iced's own
+# renderer — both hot enough (every incoming `Notify` call, every redraw)
+# that an unoptimized debug build makes the toast/centre surfaces visibly
+# janky. This overrides *dependencies only* (`package."*"` deliberately
+# excludes workspace members), so this crate's own code stays at opt-level 0
+# with full debuginfo and fast incremental rebuilds; `--release` builds are
+# unaffected (they were always optimized).
+opt-level = 3

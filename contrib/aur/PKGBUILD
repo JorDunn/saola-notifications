@@ -1,0 +1,72 @@
+# Maintainer: Jordan Dunn <jordan.dunn@nodetwo.io>
+#
+# Template — mirrors saola-session's contrib/aur/PKGBUILD. The @PKGVER@
+# placeholder and the SKIP checksum are filled in by CI: on each GitHub
+# release, .github/workflows/pkgbuild-release.yml substitutes the version
+# from the release tag, computes the tarball's real sha256, and attaches the
+# finished PKGBUILD to the release as an asset. (Not pushed to the AUR —
+# deliberately, for now.)
+#
+# Zero-touch install (mirrors saola-session/saola-panel): `pacman -U`, log
+# in, done — the graphical-session.target.wants symlink below replaces
+# `systemctl --user enable`, and the unit's own ConditionEnvironment gate
+# (see contrib/systemd/saola-notifications.service) keeps that symlink from
+# firing under a non-niri desktop installed on the same machine.
+
+pkgname=saola-notifications
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='Notification daemon, toast popups and notification centre for the Saola desktop environment (niri)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/JorDunn/saola-notifications'
+license=('MIT OR Apache-2.0')
+# iced/iced_layershell's wgpu renderer links these C libraries (verified
+# against saola-panel's and saola-lockscreen's own depends= lines, which
+# carry the same iced/iced_layershell stack).
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'vulkan-icd-loader')
+# git: the saola-theme dependency is a git dependency (pinned to a release
+# tag in Cargo.toml), so `cargo fetch` needs git available.
+makedepends=('cargo' 'git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$pkgname-v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# GitHub archives of tag saola-notifications-vX.Y.Z unpack to
+# saola-notifications-saola-notifications-vX.Y.Z (repo name + full tag; the
+# leading-"v" strip GitHub applies to v-prefixed tags doesn't fire here).
+_srcdir="$pkgname-$pkgname-v$pkgver"
+
+prepare() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_srcdir"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 contrib/systemd/saola-notifications.service \
+    "$pkgdir/usr/lib/systemd/user/saola-notifications.service"
+  # The zero-touch piece: a static enablement symlink, the same mechanism
+  # the big DEs use to autostart their session daemons. systemd treats it
+  # exactly like `systemctl --user enable` had been run — for every user,
+  # with no post-install hook and no root-touching-user-homes hack. The
+  # unit's ConditionEnvironment=XDG_CURRENT_DESKTOP=niri is the matching
+  # guard that keeps this from starting under a different DE.
+  install -d "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
+  ln -s ../saola-notifications.service \
+    "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/saola-notifications.service"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}
