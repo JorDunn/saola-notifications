@@ -168,5 +168,93 @@ technical_nouns:
     approved_meaning: The D-Bus property that reports whether a user set do-not-disturb by hand.
   - word: centreopen
     approved_meaning: The D-Bus property that reports whether the notification centre is open.
+  - word: file
+    approved_meaning: A named unit of data stored on disk, such as the config file.
+    inflections: [files]
+  - word: environment
+    approved_meaning: An environment variable, or the set of environment variables a process runs under.
+  - word: session
+    approved_meaning: A logged-in Wayland/D-Bus user session, or a disposable test session under dbus-run-session.
+  - word: app
+    approved_meaning: A short name for an application program, such as a notifying app.
+    inflections: [apps]
+  - word: cap
+    approved_meaning: Part of the config key history-cap, the largest allowed count.
+  - word: bridge
+    approved_meaning: The part of this project that turns saola-capture's own D-Bus signals into native toasts.
+  - word: window
+    approved_meaning: A windowed test compositor, or a graphical window on screen.
+    inflections: [windows]
+  - word: surface
+    approved_meaning: A layer-shell surface, the on-screen area a toast or the notification centre draws into.
+    inflections: [surfaces]
+  - word: driver
+    approved_meaning: A graphics driver, the software a graphics card needs to draw.
+  - word: build
+    approved_meaning: A compiled version of this project's own program, such as a debug build or a release build.
+    inflections: [builds]
+  - word: default
+    approved_meaning: The value a setting takes with no config file present.
+    inflections: [defaults]
+  - word: version
+    approved_meaning: A numbered release of this project or of a specification.
+    inflections: [versions]
+  - word: warning
+    approved_meaning: One tracing log line reporting a non-fatal problem.
+    inflections: [warnings]
+  - word: bus
+    approved_meaning: A D-Bus session bus.
+  - word: style
+    approved_meaning: Part of the term style guide, this project's design-language document.
+  - word: critical
+    approved_meaning: The most severe notification urgency level.
+  - word: rule
+    approved_meaning: One fixed part of this project's design, stated in AGENTS.md or PLAN.md.
+    inflections: [rules]
+  - word: document
+    approved_meaning: A written file such as this README or a design document.
+    inflections: [documents]
+  - word: specification
+    approved_meaning: The published freedesktop notification-daemon standard.
+  - word: markup
+    approved_meaning: Pango or HTML formatting tags inside a notification's body text.
+  - word: action
+    approved_meaning: A named response an operator can pick on a notification, shown as a pill.
+    inflections: [actions]
+  - word: card
+    approved_meaning: The on-screen shape of one toast.
+    inflections: [cards]
+  - word: notify
+    approved_meaning: Part of the D-Bus method name Notify, or the notify-send command.
+  - word: msg
+    approved_meaning: Part of the command name niri msg, short for message.
+  - word: startup
+    approved_meaning: The time a process first runs, before it does its main work.
+  - word: memory
+    approved_meaning: The computer's own working storage, cleared at every restart.
+  - word: restart
+    approved_meaning: Stopping a running program and starting it again.
+    inflections: [restarts]
+  - word: review
+    approved_meaning: A written check of this project's own code, such as docs/REVIEW-v0.1.md.
+    inflections: [reviews]
+  - word: desktop
+    approved_meaning: Part of the term desktop environment, or Saola itself.
+  - word: compositor
+    approved_meaning: The program that draws every window and surface on screen, such as niri.
+  - word: theme
+    approved_meaning: Part of the project name saola-theme, this project's design-system dependency.
+  - word: iced
+    approved_meaning: The Rust user-interface library this project is built with.
+  - word: zbus
+    approved_meaning: The Rust D-Bus library this project is built with.
+  - word: plan
+    approved_meaning: Part of the file name PLAN.md, this project's staged build plan.
+  - word: guide
+    approved_meaning: Part of the term style guide.
+  - word: draw
+    approved_meaning: To paint pixels for a surface on screen.
+    part_of_speech: verb
+    inflections: [draws, drew, drawn]
 technical_verbs: []
 preferred_terms: {}

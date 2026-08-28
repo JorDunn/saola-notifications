@@ -1419,6 +1419,10 @@ fn dbus_worker_stream() -> impl Stream<Item = Message> {
         let connection = match zbus::Connection::session().await {
             Ok(connection) => connection,
             Err(err) => {
+                // If this send also fails, the receiving side (iced's own
+                // subscription plumbing) is already gone — there is no
+                // shutdown left to report, and returning below ends this
+                // worker either way.
                 let _ = sender
                     .send(Message::Shutdown(ShutdownReason::BusUnavailable(
                         err.to_string(),
@@ -1522,6 +1526,10 @@ fn dbus_worker_stream() -> impl Stream<Item = Message> {
                 }
             }
             Ok(dbus::ServeOutcome::AlreadySecondInstance) => {
+                // Same reasoning as the connect-failure arm above: an
+                // undeliverable shutdown message means the runtime has
+                // already stopped listening, and this worker is about to
+                // end regardless.
                 let _ = sender
                     .send(Message::Shutdown(ShutdownReason::AlreadySecondInstance))
                     .await;

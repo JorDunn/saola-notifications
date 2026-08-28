@@ -38,8 +38,7 @@ discovery.)
 Every entry above is therefore recorded as "No", and announcing them
 upstream is an open item — carried in the Stage 5 handoff so that whoever
 next has a `saola-theme` session open (or Jordan directly) can send them in
-one message rather than six. The message text is ready to paste; it is in
-`.claude/handoffs/handoff_stage_5.attempt_1.md`.
+one message rather than six.
 
 **Stage 6 (2026-08-28)** added the seventh row above (the alpha-aware
 action-pill style) under the same constraint: no `saola-theme` session was
@@ -54,10 +53,7 @@ seven gaps in one message.
 screen-edge-inset row, which the notification centre now borrows from as
 well. The Stage 7 task briefing again states directly that **no
 `saola-theme` session exists**, so the backlog is unchanged in kind: nine
-gaps, none sent. Whoever next has a `saola-theme` session open can send all
-nine in one message; the six-gap message text from Stage 5 is in
-`.claude/handoffs/handoff_stage_5.md` and rows seven to nine are written
-above in the same voice.
+gaps, none sent.
 
 Stage 7 also found one gap that is **not** saola-theme's and is recorded
 here only so it is not looked for in the wrong repo: `iced_layershell` 0.19
@@ -65,6 +61,58 @@ exposes no output geometry to an application, so §6's `calc(100% - 98px)`
 has no `100%` to read. `main.rs` measures it from the compositor instead
 (see `CentreMode::Measure`); no theme token would help.
 
+**Stage 10 (2026-08-28, release/review prep)** tried again — `SendMessage`
+to `saola-theme` still answers "No agent named 'saola-theme' is reachable."
+Nine gaps, still none sent, four stages running. This stage also found and
+fixed a broken pointer: prior stages each said the ready-to-paste message
+text lived somewhere else (the Stage 5 handoff said it was in this file; a
+prior draft of this file said it was in the Stage 5 handoff) — nobody had
+actually written it. It is below now, not pointed at.
+
 None of these gaps are blocking: each has a token-only local workaround
 already in place, and the two envelope functions are pinned to the theme's
 own answers by test.
+
+### Ready-to-send message
+
+Paste this to a `saola-theme` session the moment one is reachable
+(`SendMessage`, found via `ListAgents`):
+
+> `saola-notifications` v0.1 carries nine recorded gaps against
+> `saola-theme-v0.13.0` (the pinned tag), each with a token-only local
+> workaround already shipping — none of these block a `saola-notifications`
+> release, they're here so a `saola-theme` release can pick them up
+> deliberately. Full detail and exact call-site references are in
+> `saola-notifications/docs/UPSTREAM-THEME-DEBT.md`; short version:
+>
+> 1. No urgent *notification* card — `style::container::card_urgent` paints
+>    an ivory card with ink text (§6's notification card is solid ink with
+>    ivory text) and takes no `alpha`. Wanted: `notification_card_urgent(t,
+>    alpha)`.
+> 2. `style::notification::{life_rule, icon_tile}` take no `alpha`, so a
+>    card's inner chrome can't fade with the rest of it (iced 0.14 has no
+>    subtree opacity).
+> 3. `motion::{toast_alpha, life_fraction}` hardwire `motion.toast_idle` as
+>    the rest span — can't express a `Notify` call's own `expire_timeout`.
+>    Wanted: a variant taking the rest span as a parameter.
+> 4. No shared screen-edge-inset token — `sizes.panel_margin_islands` (the
+>    panel's own islands margin) now stands in for a generic "26px from the
+>    relevant edge" in three unrelated places (toast surface, notification
+>    centre, and originally the panel itself).
+> 5. No redraw-cadence token — every animated Saola surface invents its own
+>    frame interval (32ms here, matching saola-capture's own toast).
+> 6. No easing helper — §5 specifies `ease-out` for the toast entrance;
+>    `motion::fraction` is linear, so the entrance is linear too.
+> 7. No alpha-aware action-pill style — `style::button::rest`/`emphasis`/
+>    `widget::pill_button` take no `alpha`, same class of gap as #2, on a
+>    third widget family.
+> 8. `widget::empty_state` is unconditionally `Fill × Fill`, which no
+>    layer-shell surface (height declared before layout) can give it.
+> 9. Nothing carries the notification centre's *vertical* rhythm —
+>    `sizes.notification_centre_width` is the only centre-specific token;
+>    the rest is assembled from generic tokens and will drift if a second
+>    consumer reinvents it differently.
+>
+> No action needed beyond acknowledging receipt if you're picking any of
+> these up — every workaround already in place is token-only, so there's no
+> urgency, just a backlog worth clearing when saola-theme next has room.

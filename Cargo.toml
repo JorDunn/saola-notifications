@@ -41,17 +41,54 @@ repository = "https://github.com/JorDunn/saola-notifications"
 # this daemon has no windowed/toplevel surface (Architecture: layer-shell
 # overlays only, `iced_layershell::build_pattern::daemon`), so iced's own
 # `default` feature set (`wgpu, tiny-skia, crisp, web-colors, thread-pool,
-# linux-theme-detection, x11, wayland`) is not blanket-appropriate here —
-# instead `wayland` and the rendering backend arrive transitively through
-# `iced_layershell` itself (verified: `iced_layershell` depends on
-# `iced_winit`/`iced_renderer` directly, the same shape `saola-theme`'s own
-# `Cargo.toml` uses when it declares `default-features = false` against a
-# near-identical feature list).
+# linux-theme-detection, x11, wayland`) is not blanket-appropriate here.
+#
+# Correction — 2026-08-28 (Stage 10 review). The paragraph above originally
+# also claimed "the rendering backend arrives transitively through
+# `iced_layershell` itself" and shipped with neither `wgpu` nor `tiny-skia`
+# in this list. That claim was never actually verified against a real
+# release build, and it is wrong: `iced_layershell` depends on
+# `iced_renderer` with no feature list of its own
+# (`iced_layershell-0.19.1/Cargo.toml`'s `[dependencies.iced_renderer]` has
+# no `features = [...]` line), so it forwards nothing. `cargo tree -f "{p}
+# [{f}]" -p iced_renderer` against this exact Cargo.toml, before this fix,
+# resolved to `iced_renderer v0.14.0 [geometry,image,svg,wayland]` — no
+# `wgpu`, no `tiny-skia`. `iced_renderer`'s own `src/lib.rs` defines
+# `Renderer`/`Compositor` as the real thing only `#[cfg(any(feature =
+# "wgpu-bare", feature = "tiny-skia"))]`; with neither enabled, the
+# `#[cfg(not(any(...)))]` fallback arm compiles `Renderer = ()`,
+# `Compositor = ()` — but only reaches a hard `compile_error!` under
+# `#[cfg(not(debug_assertions))]`. Every `cargo build`/`test`/`clippy` run
+# from Stage 1 through Stage 9 was a *debug* build, so this silently
+# resolved to the no-op renderer stub and never failed — `cargo build
+# --release` (Stage 10's own verify command, and the AUR `PKGBUILD`'s real
+# build) is release-profile and hit the `compile_error!` immediately. This
+# is very likely the actual explanation for the "on-demand layer-shell
+# surfaces never paint a visible frame in the nested niri" finding every
+# stage from 5 onward recorded as an environmental quirk of the winit-backed
+# nested compositor — a debug build of this crate never had a working
+# renderer to paint with in the first place, in any stage, on any
+# compositor. It does not explain Stage 5's control test (a *release-built*
+# `saola-capture`, whose own `Cargo.toml` keeps iced's `default` features and
+# therefore *does* get `wgpu`/`tiny-skia`, was also invisible in the same
+# nested session) — that half of the mystery is unresolved and belongs to
+# whoever next has pixels to look at; see `docs/REVIEW-v0.1.md`. Fix: add
+# `wgpu` and `tiny-skia` back explicitly, matching what every sibling gets
+# for free via iced's `default` feature set (`iced_renderer::fallback`
+# picks between them at runtime — `tiny-skia` is the software fallback that
+# keeps a background daemon painting even without a working Vulkan driver,
+# which matters more here than for a foreground app a user would notice and
+# report). `wayland` is still not listed directly — it keeps arriving via
+# `saola-theme`'s own `canvas` feature (confirmed in the same `cargo tree`
+# run), which is incidental, not a dependency this crate should lean on;
+# worth adding explicitly if that ever changes.
 iced = { version = "0.14", default-features = false, features = [
     "tokio",
     "svg",
     "advanced",
     "image-without-codecs",
+    "wgpu",
+    "tiny-skia",
 ] }
 # See the `iced` essay above: PNG decode for the `image-path`/`icon_data`
 # hint aliases (Stage 4). `default-features = false` + `png` — no `rayon`

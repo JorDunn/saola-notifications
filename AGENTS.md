@@ -13,7 +13,24 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: **Stage 9 done — the control interface finished.**
+> Status: **v0.1 feature-complete, reviewed.** Stage 10 closed out v0.1:
+> `docs/REVIEW-v0.1.md` is the review (silent-failure audit, spec-conformance
+> pass, packaging review); `docs/UPSTREAM-THEME-DEBT.md` is finalized with a
+> ready-to-send message for the still-unreachable `saola-theme` session;
+> `README.md` is rewritten end to end (it had drifted all the way back to
+> describing the Stage 1 skeleton). The one real defect this stage found:
+> `cargo build --release` failed outright — `Cargo.toml`'s `iced` dependency
+> never enabled a rendering backend (`wgpu`/`tiny-skia`), which every prior
+> stage's debug-only verify command silently absorbed via `iced_renderer`'s
+> own `debug_assertions`-gated fallback. Fixed (both features added, dated
+> addendum in `Cargo.toml`) — see the review's finding C-1 for the full
+> chain of evidence, including why this likely explains (but does not fully
+> explain — see the review) the "no pixels" finding below. v0.1's one
+> outstanding blocker for a real release is unrelated to code: **nobody has
+> confirmed the toast or the centre actually draw correctly on a real
+> screen**, per the caveat this section has carried since Stage 5.
+>
+> **Stage 9 done — the control interface finished.**
 > `src/modules/centre.rs` is style guide §6's centre: 460 px
 > (`sizes.notification_centre_width`), anchored 72 px from the top and 26 px
 > from the right, history grouped by application into collapsible groups
@@ -103,10 +120,11 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 
 ```sh
 cargo build
+cargo build --release                       # required before packaging — see the Stage 10 status note above
 cargo test
 cargo clippy --all-targets -- -D warnings   # CI gate — warnings are errors
 cargo fmt --check                           # CI gate
-cargo run                                   # needs BOTH a Wayland session (niri) and a D-Bus session bus
+cargo run --release                         # needs BOTH a Wayland session (niri) and a D-Bus session bus
 ```
 
 Live-testing anything that maps surfaces happens in a **nested niri**
@@ -124,13 +142,24 @@ niri msg layers                          # the only introspection that lists lay
 grim shot.png                            # composited output of the nested compositor
 ```
 
-**Known caveat (Stage 5, niri 26.04):** inside a nested (winit-backed) niri,
-an `iced_layershell` `StartMode::Background` daemon's on-demand surfaces are
-created, positioned and destroyed correctly — `niri msg layers` proves it —
-but never paint a visible frame. Reproduced identically with saola-capture's
-own known-good toast, so it is a property of the nested compositor, not of
-this crate. Verify surface **lifecycle** with `niri msg layers` there; visual
-confirmation needs a real niri session.
+**Known caveat (Stage 5, niri 26.04; partially explained Stage 10):** inside
+a nested (winit-backed) niri, an `iced_layershell` `StartMode::Background`
+daemon's on-demand surfaces are created, positioned and destroyed correctly —
+`niri msg layers` proves it — but never paint a visible frame. Reproduced
+identically with saola-capture's own known-good toast. Stage 10 found one
+real, sufficient cause for *this crate's own* half of that: every debug
+build of this crate, in every stage, had `Cargo.toml`'s `iced` dependency
+compiled with no rendering backend at all (`Renderer = ()`, a no-op stub —
+see `docs/REVIEW-v0.1.md`'s finding C-1), silently, because
+`iced_renderer`'s hard `compile_error!` for that condition is gated behind
+`#[cfg(not(debug_assertions))]` and nothing before Stage 10 ever ran a
+release build. That is fixed now (`wgpu` + `tiny-skia` added). It does
+**not** explain saola-capture's own control test in the same nested session
+— that binary's `Cargo.toml` never disabled `iced`'s default renderer
+features, so it had a real renderer and was still invisible. Verify surface
+**lifecycle** with `niri msg layers` there; visual confirmation needs a real
+niri session, and per the Stage 10 review that confirmation has never
+actually happened.
 
 ## Architecture (binding — PLAN.md's Architecture section is the source)
 

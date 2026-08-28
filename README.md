@@ -9,11 +9,17 @@ notification centre.
 
 ## Status
 
-Pre-v0.1, skeleton stage. The staged build plan is [PLAN.md](PLAN.md); agent
-conventions are in [AGENTS.md](AGENTS.md). No daemon, D-Bus service, or UI
-surface exists yet — `cargo run` resolves and loads `notifications.toml`,
-logs the result, and exits. The UI follows the
-[Saola style guide](docs/SAOLA-STYLE-GUIDE.md).
+Version 0.1. All planned features work: the freedesktop notification
+daemon, the toast stack, the notification centre, and a bridge that
+turns saola-capture signals into native toasts and turns on
+do-not-disturb during a recording. History exists in memory only in
+version 0.1. A restart clears it. The user interface follows the
+[Saola style guide](docs/SAOLA-STYLE-GUIDE.md). [PLAN.md](PLAN.md) has
+the staged build plan. [AGENTS.md](AGENTS.md) has agent conventions.
+[docs/REVIEW-v0.1.md](docs/REVIEW-v0.1.md) has the version 0.1 review.
+One open point from that review: **no test has confirmed that the toast
+or the notification centre draw the way the style guide describes.**
+See "A known limitation," below.
 
 ## Building
 
@@ -29,23 +35,54 @@ section for the full verify sequence CI runs.
 ## Running
 
 ```bash
-cargo run
+cargo run --release
 ```
 
-Right now `cargo run` needs no Wayland session at all — it only resolves and
-loads `notifications.toml` and exits. Once the daemon lands (Stage 5) it
-will need a real niri session, or `niri` started inside a window for
-isolated testing (see AGENTS.md). There is no CLI surface yet; later
-stages add D-Bus service startup, then the toast and notification centre
-surfaces.
+This command needs a niri compositor session and a D-Bus session bus.
+The daemon asks to own the name `org.freedesktop.Notifications`, the
+standard name every notifying app calls. When another notification
+daemon — mako or dunst — owns that name first, this daemon writes a log
+line and keeps running under its own name only. The control interface,
+the capture bridge, and the toast and centre surfaces work either way. A
+second copy of this daemon exits at once with a normal exit code,
+instead of fighting the first copy for its own bus name,
+`io.saola.Notifications1`.
+
+For a packaged install, `contrib/systemd/saola-notifications.service`
+is a `systemd --user` unit. The unit starts the daemon under a niri
+session only (see the unit file for the exact rule), and restarts the
+daemon after a failure. `contrib/aur/PKGBUILD` builds and installs the
+program, the unit, and a link that turns the unit on with no extra
+step.
+
+### Isolated tests (nested niri)
+
+To try the daemon without a real session, run niri inside a window.
+Point the daemon and a test tool such as `notify-send` or `busctl` at
+one shared D-Bus session bus:
+
+```bash
+niri &                                  # a niri window opens; its own log names its Wayland socket
+export WAYLAND_DISPLAY=wayland-2        # whatever that log printed
+dbus-run-session -- bash -c '
+  ./target/release/saola-notifications &
+  notify-send "Hello" "A test notification"
+  niri msg layers                       # lists layer-shell surfaces this daemon created
+'
+```
+
+`niri msg layers` shows only that a surface exists, and where. It does
+not show what, if anything, the surface draws. See "A known
+limitation," below.
 
 ## Configuring
 
-`notifications.toml`, hand-walked over `toml::Table` — never
-`#[derive(Deserialize)]`, so one bad setting only warns and falls back to
-its own default; the rest of the file still applies. No file present means
-silent defaults; an unparseable file prints one warning and starts with
-defaults anyway. The app never fails to start over a bad config.
+`notifications.toml`. The daemon reads this file by hand, key by key —
+never through Rust's `#[derive(Deserialize)]`. One bad setting drops to
+its own default and prints one warning; every other setting in the
+file still applies. A missing file gives every default with no warning.
+A file the parser cannot read at all gives every default with one
+warning. A bad config never stops the daemon from starting.
 
 **Resolution chain** (first match wins; an environment variable set to the
 empty string counts as unset):
@@ -54,14 +91,14 @@ empty string counts as unset):
 2. `$XDG_CONFIG_HOME/saola`
 3. `~/.config/saola`
 
-The file itself is `<that directory>/notifications.toml`.
+The path resolved this way, plus `notifications.toml`, names the file.
 
 ### Schema
 
-Live-reload watches the resolved config directory: edit `notifications.toml`
-while the daemon runs and the change applies without a restart (once the
-daemon itself lands in Stage 5 — today `cargo run` only loads the file once,
-at startup).
+The daemon watches the config directory while it runs. Edit
+`notifications.toml`, and the change takes effect at once, with no
+restart. An edit the parser cannot read gives one warning and changes
+nothing — the daemon keeps the config it had before the edit.
 
 ```toml
 # Do not disturb by default at startup (toggle at runtime from the
@@ -93,6 +130,45 @@ the zero-hardcoded-style rule with its theme-gap protocol — live in
 truth for contributing code. The staged build plan and its frozen external
 contracts (`org.freedesktop.Notifications`, `io.saola.Notifications1`, the
 consumed `io.saola.Capture1` signals) are in [PLAN.md](PLAN.md).
+
+### `org.freedesktop.Notifications` (frozen contract)
+
+This is the standard freedesktop notification-daemon interface. Every
+notifying app speaks this interface now — `notify-send`, web browsers,
+chat clients — no matter which desktop it runs on. This daemon serves
+the interface as the freedesktop specification defines it. This
+section names only the exact values this daemon returns, not the full
+specification.
+
+The daemon serves this interface at the object path
+`/org/freedesktop/Notifications`. It serves this interface only while
+it owns the matching bus name (see "Running," above, for the other
+case).
+
+- `GetCapabilities() -> as` — Returns the list `["body", "actions",
+  "icon-static", "persistence"]`. This daemon does not support
+  `body-markup`. An app may send Pango or HTML markup in a
+  notification's body text. This daemon removes that markup before
+  it shows the text.
+- `GetServerInformation() -> (ssss)` — Returns `("saola-notifications",
+  "Saola", <this daemon's version number>, "1.2")`. The value `"1.2"`
+  names the version of the freedesktop specification this daemon
+  implements. This value does not change with the daemon's version
+  number.
+- `Notify(...) -> u` — Accepts a new notification and returns its `id`.
+  When a caller sets `replaces_id` to an `id` in use, this daemon
+  returns that same `id`.
+- `CloseNotification(u id)` — Removes one notification, named by `id`,
+  from the toast stack, and sends `NotificationClosed(id, 3)`.
+- `NotificationClosed(u id, u reason)` — A signal this daemon sends
+  each time a notification leaves the toast stack. `reason` is `1`
+  when the notification's timeout ran out, `2` when an operator
+  dismissed it by hand (a card click, an action pill, or a dismissal
+  through `io.saola.Notifications1`), or `3` after a
+  `CloseNotification` call.
+- `ActionInvoked(u id, s action_key)` — A signal this daemon sends
+  when an operator picks one of a notification's action pills, or
+  clicks a card that carries a `"default"` action.
 
 ### `io.saola.Notifications1` (frozen contract)
 
@@ -146,6 +222,28 @@ at each time its value changes.
   notification centre.
 - `CentreOpen: b` — This property is `true` when the notification centre
   is open at this time.
+
+## A known limitation
+
+No test has confirmed, on a real screen, that a toast card or the
+notification centre draw the way the [style
+guide](docs/SAOLA-STYLE-GUIDE.md) describes them. Every development
+stage tested this daemon inside a nested niri window, for safety (see
+AGENTS.md). In that test, a surface the daemon creates on demand shows
+up in `niri msg layers` with the right name, place, size, and keyboard
+behavior. The surface draws no visible frame. [docs/REVIEW-v0.1.md](docs/
+REVIEW-v0.1.md) has more detail: an earlier build setting left this
+daemon with no working graphics driver in a debug build. Stage 10 fixed
+that setting (see that document's finding C-1). The fix explains a
+blank screen for every debug build up to now. The fix does not explain
+why a release build of a sibling program, `saola-capture`, drew a
+blank screen too, in the same test.
+
+**Run this daemon on a real niri session. Confirm a notification shows
+up before you trust any part of its visual design.** If a notification
+does not show up, a fault remains in how the daemon creates a surface
+after startup, not at startup the way `saola-panel` creates its own
+surfaces. That fault needs its own study.
 
 ## License
 
