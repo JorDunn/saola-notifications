@@ -1,0 +1,682 @@
+//! The D-Bus bridge: both frozen interfaces, served headlessly.
+//!
+//! PLAN.md Stage 3 builds this file with no UI behind it at all —
+//! `main.rs` is still a plain `#[tokio::main]` runner (see its own doc
+//! comment) that spawns [`run`] and logs whatever [`DaemonEvent`] it
+//! forwards. Nothing here decides what a notification *means* yet (that is
+//! Stage 4's pure `store.rs`) or shows anything on screen (Stage 5's
+//! layershell surfaces) — this file's whole job is to answer the bus
+//! correctly and hand raw, unparsed call data across a channel for a later
+//! stage to interpret.
+//!
+//! # Serving vs. proxying (teaching note, same split as
+//! `saola-capture::dbus` and `saola-session::modules::inhibit`)
+//!
+//! Two independent `#[zbus::interface]` blocks live in this file, one per
+//! frozen contract (PLAN.md's "Frozen external contracts" section, and the
+//! saola-files two-interface rule AGENTS.md names): [`NotificationsService`]
+//! serves `org.freedesktop.Notifications` — the interface every notifying
+//! app (`notify-send`, browsers, chat clients) already knows how to call,
+//! regardless of which desktop it's running on. [`ControlService`] serves
+//! `io.saola.Notifications1` — this desktop's own contract, the one the
+//! saola-panel indicator (and later this crate's own toast/centre modules)
+//! will drive. Both are plain Rust structs whose inherent `impl` blocks are
+//! rewritten by the `#[zbus::interface(name = "...")]` macro into a real
+//! `zbus::object_server::Interface` implementation; nothing in this crate
+//! calls their methods directly — `zbus::ObjectServer` dispatches incoming
+//! bus calls onto them once [`serve`] registers an instance of each at its
+//! object path.
+//!
+//! # Why every served method forwards a [`DaemonEvent`] instead of *doing*
+//! anything
+//!
+//! There is no store, no toast stack, and no centre yet — Stages 4/5 build
+//! those. So every method below does the minimum a bus caller is owed
+//! (validate nothing yet, log the call, hand back the one value the spec
+//! promises) and then offers the raw call data to whoever eventually
+//! listens on the other end of `events`. `try_send`, never
+//! `.send().await`, at every one of those hand-offs — Architecture's rule,
+//! restated here because it is the one thing in this file most likely to
+//! be copied wrong later: blocking a D-Bus method reply on some other
+//! task's event loop keeping up would turn a slow UI frame into a hung
+//! `notify-send`. A full channel (or a receiver that's gone) degrades to a
+//! logged warning; the bus caller still gets its answer either way.
+//!
+//! # Name claims (teaching note — read before touching [`serve`])
+//!
+//! Both well-known names are requested with `RequestNameFlags::DoNotQueue`
+//! **alone** — never `ReplaceExisting`, per
+//! `saola-session::modules::inhibit`'s own load-bearing warning about that
+//! flag (its module doc comment explains exactly what goes wrong if a
+//! claim ever sets it: silently breaking whichever service already owned
+//! the name for every other app on the machine). Object registration
+//! always happens *before* the matching name request (same "object first,
+//! name second" rule both `saola-capture::dbus::serve` and
+//! `saola-session::modules::inhibit::run` document) so there is never a
+//! window where a caller sees a name appear on the bus and finds nothing
+//! answering at its path.
+//!
+//! The two names carry **different consequences** when already taken —
+//! this is the one place this file's behavior genuinely branches:
+//!
+//! - `org.freedesktop.Notifications` taken means mako, dunst, or some other
+//!   notification daemon already owns it. That is a completely normal
+//!   desktop state (Jordan may not have removed the old daemon yet), so
+//!   this degrades to "stay inert on that interface, log it, keep running"
+//!   — the control interface (and everything built on it later) still
+//!   works.
+//! - `io.saola.Notifications1` taken means another **`saola-notifications`
+//!   process** already owns it — nothing else could legitimately claim
+//!   this desktop's own reverse-DNS name. That is a genuine second
+//!   instance, and [`run`] exits the whole process with `std::process::
+//!   exit(0)` rather than let two daemons fight over one D-Bus contract.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use iced::futures::channel::mpsc;
+use zbus::Connection;
+use zbus::fdo::{RequestNameFlags, RequestNameReply};
+use zbus::object_server::SignalEmitter;
+use zbus::zvariant::OwnedValue;
+
+/// The well-known bus name and object path for the freedesktop
+/// notification-daemon contract every notifying app already speaks.
+pub const NOTIFICATIONS_SERVICE_NAME: &str = "org.freedesktop.Notifications";
+pub const NOTIFICATIONS_OBJECT_PATH: &str = "/org/freedesktop/Notifications";
+
+/// The well-known bus name and object path for this desktop's own control
+/// contract (PLAN.md Frozen external contracts) — the saola-panel
+/// indicator's seam into this daemon.
+pub const CONTROL_SERVICE_NAME: &str = "io.saola.Notifications1";
+pub const CONTROL_OBJECT_PATH: &str = "/io/saola/Notifications1";
+
+// ============================================================================
+// IdAllocator — the one piece of this file's behavior pure enough, and
+// specific enough, to be worth a unit test rather than only manual
+// `busctl` evidence. No zbus types, no async, no `Arc`.
+// ============================================================================
+
+/// Allocates notification ids for `Notify`, per PLAN.md Architecture:
+/// "`AtomicU32`, start 1, skip 0 on wrap". `0` is reserved by the
+/// freedesktop spec to mean "no notification" (it is never a valid id to
+/// hand back), so this must never return it — including the one time in
+/// four billion calls where a plain wrapping counter would.
+///
+/// `AtomicU32` rather than a `Mutex<u32>`: the interior mutability an
+/// `&self`-only method needs (every `#[zbus::interface]` method takes
+/// `&self`, never `&mut self` — zbus dispatches concurrent calls) with no
+/// lock to poison and nothing to hold across an `.await`.
+#[derive(Debug)]
+struct IdAllocator {
+    next: AtomicU32,
+}
+
+impl IdAllocator {
+    fn new() -> Self {
+        Self {
+            next: AtomicU32::new(1),
+        }
+    }
+
+    /// Test-only: start the counter somewhere other than `1`, so
+    /// wraparound can be exercised directly rather than by actually
+    /// allocating four billion ids.
+    #[cfg(test)]
+    fn starting_at(next: u32) -> Self {
+        Self {
+            next: AtomicU32::new(next),
+        }
+    }
+
+    /// Allocates and returns the next id, wrapping past `u32::MAX` and
+    /// skipping the reserved `0`.
+    ///
+    /// `AtomicU32::fetch_add` itself already wraps `u32::MAX -> 0` per its
+    /// own documented semantics — no overflow check needed, and this
+    /// crate's no-panic rule needs none here. The loop exists purely to
+    /// skip the one value the spec reserves; it runs at most twice per
+    /// call, since `fetch_add(1)` can never hand back the same skipped
+    /// value on two consecutive iterations.
+    fn allocate(&self) -> u32 {
+        loop {
+            let id = self.next.fetch_add(1, Ordering::Relaxed);
+            if id != 0 {
+                return id;
+            }
+        }
+    }
+}
+
+/// The frozen `GetCapabilities` reply (PLAN.md Frozen external contracts):
+/// v0.1 supports `body`, `actions`, `icon-static`, and `persistence` —
+/// deliberately not `body-markup` (Stage 4 strips markup at parse time
+/// rather than rendering it), `sound`, or `action-icons`.
+fn capabilities() -> Vec<&'static str> {
+    vec!["body", "actions", "icon-static", "persistence"]
+}
+
+// ============================================================================
+// DaemonEvent — the in-process bridge from a served bus call to whatever
+// eventually consumes it. This is not part of either wire contract; it is
+// how this file hands raw call data across the `mpsc` channel to Stage 5's
+// iced `Daemon::update` (via `main.rs`'s own drain loop, for now).
+// ============================================================================
+
+/// One notification-shaped or control-shaped thing a bus caller asked for.
+///
+/// Every variant carries exactly the arguments its served method received
+/// — nothing is interpreted here (Stage 4's `store.rs` owns hint parsing,
+/// urgency, image decode, and markup stripping; this stage only logs and
+/// forwards). `#[derive(Debug)]` is what lets `main.rs`'s drain loop log
+/// each event with `tracing::info!(?event, ..)` without every future stage
+/// having to write its own `Display`.
+///
+/// `#[allow(dead_code)]`: every field here is *constructed* (each served
+/// method below builds one) but never *read* — `main.rs`'s Stage 3 drain
+/// loop only ever formats a whole event via `Debug` (`?event`), which
+/// dead-code analysis does not count as a real read (the same situation
+/// `config_watch.rs`'s Stage 2 module-level allow documents: a type is
+/// inert until the stage that actually consumes its fields exists).
+/// Stage 5's `iced::Daemon::update` is that consumer — remove this allow
+/// once it's the one matching on these variants and reading their fields
+/// for real.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum DaemonEvent {
+    /// A `Notify` call. `id` is already resolved (a fresh allocation, or
+    /// `replaces_id` echoed back) by the time this is sent — see
+    /// [`NotificationsService::notify`].
+    Notify {
+        id: u32,
+        replaces_id: u32,
+        app_name: String,
+        app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        hints: HashMap<String, OwnedValue>,
+        expire_timeout: i32,
+    },
+    /// A `CloseNotification` call. The matching `NotificationClosed(id, 3)`
+    /// signal is already emitted on the bus by the time this is sent (see
+    /// [`NotificationsService::close_notification`]) — this is purely the
+    /// in-process half, for whichever stage first needs to react to a
+    /// close by removing a toast or a history entry.
+    CloseNotification { id: u32 },
+    /// `io.saola.Notifications1`'s `ToggleCentre()`.
+    ToggleCentre,
+    /// `io.saola.Notifications1`'s `OpenCentre()`.
+    OpenCentre,
+    /// `io.saola.Notifications1`'s `CloseCentre()`.
+    CloseCentre,
+    /// `io.saola.Notifications1`'s `SetDnd(b)` — manual DND only; auto-DND
+    /// from a live recording (Stage 8) is a separate signal path entirely
+    /// and never reaches this file.
+    SetDnd { manual: bool },
+    /// `io.saola.Notifications1`'s `DismissAll()`.
+    DismissAll,
+    /// `io.saola.Notifications1`'s `Dismiss(u id)`.
+    Dismiss { id: u32 },
+}
+
+// ============================================================================
+// NotificationsService — org.freedesktop.Notifications.
+// ============================================================================
+
+/// The daemon-side implementation of `org.freedesktop.Notifications`.
+///
+/// Holds only what a served method actually needs: the id counter (see
+/// [`IdAllocator`]) and a clone of the channel every method forwards a
+/// [`DaemonEvent`] over. `mpsc::Sender` is cheap to clone (an `Arc`-backed
+/// handle internally), so every method below clones it fresh rather than
+/// threading a `&mut self` through — zbus dispatches concurrent calls with
+/// only `&self` available, the same reason [`IdAllocator`] uses an atomic
+/// instead of a plain counter.
+struct NotificationsService {
+    events: mpsc::Sender<DaemonEvent>,
+    next_id: IdAllocator,
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl NotificationsService {
+    /// `Notify(app_name, replaces_id, app_icon, summary, body, actions,
+    /// hints, expire_timeout) -> id`.
+    ///
+    /// The freedesktop spec fixes this exact eight-argument signature —
+    /// `#[allow(clippy::too_many_arguments)]` below is about that fixed
+    /// wire contract, not a design choice this file could simplify away.
+    ///
+    /// `replaces_id != 0` means the caller is asking to reuse that id
+    /// (the freedesktop "replace" convention — this crate's own
+    /// replace-vs-same-app style rules land in Stage 4); until Stage 4's
+    /// store exists to actually replace anything, this just echoes it back
+    /// verbatim rather than burning a fresh allocation. `replaces_id == 0`
+    /// allocates a new id from [`Self::next_id`].
+    ///
+    /// Nothing here can fail — id allocation cannot fail, and there is no
+    /// argument validation yet (Stage 4's job) — so this returns a plain
+    /// `u32`, not a `zbus::fdo::Result`.
+    #[allow(clippy::too_many_arguments)]
+    async fn notify(
+        &self,
+        app_name: String,
+        replaces_id: u32,
+        app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        hints: HashMap<String, OwnedValue>,
+        expire_timeout: i32,
+    ) -> u32 {
+        let id = if replaces_id != 0 {
+            replaces_id
+        } else {
+            self.next_id.allocate()
+        };
+
+        tracing::info!(
+            id,
+            replaces_id,
+            app_name = %app_name,
+            summary = %summary,
+            hint_count = hints.len(),
+            "org.freedesktop.Notifications: Notify"
+        );
+
+        if self
+            .events
+            .clone()
+            .try_send(DaemonEvent::Notify {
+                id,
+                replaces_id,
+                app_name,
+                app_icon,
+                summary,
+                body,
+                actions,
+                hints,
+                expire_timeout,
+            })
+            .is_err()
+        {
+            tracing::warn!(
+                id,
+                "org.freedesktop.Notifications: could not forward Notify to the daemon (channel \
+                 full or the daemon's event loop is gone) — the caller still gets its id back"
+            );
+        }
+
+        id
+    }
+
+    /// `CloseNotification(id)`. Always emits `NotificationClosed(id, 3)` —
+    /// reason `3`, "the CALL_CLOSE_NOTIFICATION method was called", the
+    /// one reason this method is always entitled to claim regardless of
+    /// whatever a later stage's store believes about that id (nothing
+    /// tracks live notification state yet, so there is nothing to check
+    /// against — a `CloseNotification` for an id that never existed still
+    /// gets the same honest signal a real freedesktop daemon would send).
+    async fn close_notification(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+    ) {
+        tracing::info!(id, "org.freedesktop.Notifications: CloseNotification");
+
+        if let Err(err) = Self::notification_closed(&emitter, id, 3).await {
+            tracing::warn!(
+                id,
+                error = %err,
+                "org.freedesktop.Notifications: could not emit NotificationClosed"
+            );
+        }
+
+        if self
+            .events
+            .clone()
+            .try_send(DaemonEvent::CloseNotification { id })
+            .is_err()
+        {
+            tracing::warn!(
+                id,
+                "org.freedesktop.Notifications: could not forward CloseNotification to the \
+                 daemon (channel full or the daemon's event loop is gone) — the signal above was \
+                 still emitted"
+            );
+        }
+    }
+
+    /// `GetCapabilities() -> as`. See [`capabilities`] for the frozen list.
+    async fn get_capabilities(&self) -> Vec<String> {
+        capabilities().into_iter().map(String::from).collect()
+    }
+
+    /// `GetServerInformation() -> (ssss)`. The four values are frozen by
+    /// PLAN.md's Frozen external contracts section — `"1.2"` is the
+    /// freedesktop Notifications *spec* version this daemon implements,
+    /// not this crate's own `CARGO_PKG_VERSION` (which fills the third
+    /// slot instead).
+    async fn get_server_information(&self) -> (String, String, String, String) {
+        (
+            "saola-notifications".to_string(),
+            "Saola".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+            "1.2".to_string(),
+        )
+    }
+
+    /// Emitted by [`Self::close_notification`] today; Stage 4/5's expiry
+    /// policy and click-dismiss will emit it with reasons `1`
+    /// (expired) and `2` (user-dismissed) respectively.
+    #[zbus(signal)]
+    async fn notification_closed(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
+
+    /// Part of the frozen contract from this stage on; nothing emits it
+    /// yet — Stage 6 ("Actions") is what invokes an action pill and fires
+    /// this.
+    #[zbus(signal)]
+    async fn action_invoked(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
+}
+
+// ============================================================================
+// ControlService — io.saola.Notifications1.
+// ============================================================================
+
+/// The daemon-side implementation of `io.saola.Notifications1`. No id
+/// allocator needed here — every method is a simple trigger.
+struct ControlService {
+    events: mpsc::Sender<DaemonEvent>,
+}
+
+impl ControlService {
+    /// Internal helper — a **plain** `impl` block, not `#[zbus::interface]`
+    /// (anything inside that macro's block would itself be exported on the
+    /// bus, the same reason `saola-capture::dbus::CaptureService`'s own
+    /// interactive-region helpers live in a separate plain `impl`). Every
+    /// control method below is identically shaped ("log, try_send, warn on
+    /// failure"), so this is the one place that shape is written.
+    fn forward(&self, event: DaemonEvent, method: &'static str) {
+        if self.events.clone().try_send(event).is_err() {
+            tracing::warn!(
+                method,
+                "io.saola.Notifications1: could not forward {method} to the daemon (channel full \
+                 or the daemon's event loop is gone)"
+            );
+        }
+    }
+}
+
+#[zbus::interface(name = "io.saola.Notifications1")]
+impl ControlService {
+    async fn toggle_centre(&self) {
+        tracing::info!("io.saola.Notifications1: ToggleCentre");
+        self.forward(DaemonEvent::ToggleCentre, "ToggleCentre");
+    }
+
+    async fn open_centre(&self) {
+        tracing::info!("io.saola.Notifications1: OpenCentre");
+        self.forward(DaemonEvent::OpenCentre, "OpenCentre");
+    }
+
+    async fn close_centre(&self) {
+        tracing::info!("io.saola.Notifications1: CloseCentre");
+        self.forward(DaemonEvent::CloseCentre, "CloseCentre");
+    }
+
+    /// `SetDnd(b)` — manual DND only (Architecture: `effective_dnd = manual
+    /// || recording`; recording auto-DND has no bus setter, by design).
+    async fn set_dnd(&self, manual: bool) {
+        tracing::info!(manual, "io.saola.Notifications1: SetDnd");
+        self.forward(DaemonEvent::SetDnd { manual }, "SetDnd");
+    }
+
+    async fn dismiss_all(&self) {
+        tracing::info!("io.saola.Notifications1: DismissAll");
+        self.forward(DaemonEvent::DismissAll, "DismissAll");
+    }
+
+    async fn dismiss(&self, id: u32) {
+        tracing::info!(id, "io.saola.Notifications1: Dismiss");
+        self.forward(DaemonEvent::Dismiss { id }, "Dismiss");
+    }
+
+    /// Placeholder — no store exists yet to count against. Stage 9 wires
+    /// this (and the three properties below) to live state and starts
+    /// emitting `PropertiesChanged`, per PLAN.md's Frozen external
+    /// contracts section ("all properties emit `PropertiesChanged`").
+    #[zbus(property)]
+    fn notification_count(&self) -> u32 {
+        0
+    }
+
+    /// Placeholder for `effective_dnd = manual || recording` (Architecture)
+    /// — always `false` until Stage 8/9 wire real DND state.
+    #[zbus(property)]
+    fn dnd_active(&self) -> bool {
+        false
+    }
+
+    /// Placeholder for the manual-only DND flag `SetDnd` above will
+    /// eventually toggle.
+    #[zbus(property)]
+    fn dnd_manual(&self) -> bool {
+        false
+    }
+
+    /// Placeholder — no centre surface exists until Stage 7.
+    #[zbus(property)]
+    fn centre_open(&self) -> bool {
+        false
+    }
+}
+
+// ============================================================================
+// serve / run — name claims and the long-lived worker.
+// ============================================================================
+
+/// What [`serve`] settled into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeOutcome {
+    /// This process is serving `io.saola.Notifications1` (and is therefore
+    /// the daemon). `notifications_owned` says whether it *also* owns
+    /// `org.freedesktop.Notifications` — `false` when another notification
+    /// daemon (mako, dunst, …) already does; the control interface and
+    /// everything built on it in later stages work either way.
+    Serving { notifications_owned: bool },
+    /// Another `saola-notifications` process already owns
+    /// `io.saola.Notifications1` — see [`run`]'s doc comment for what
+    /// happens next.
+    AlreadySecondInstance,
+}
+
+/// Registers both interfaces' objects and claims their well-known names.
+/// See this module's own doc comment ("Name claims") for the full posture
+/// and why the two names are handled differently when already taken.
+pub async fn serve(
+    connection: &Connection,
+    events: mpsc::Sender<DaemonEvent>,
+) -> zbus::Result<ServeOutcome> {
+    connection
+        .object_server()
+        .at(
+            NOTIFICATIONS_OBJECT_PATH,
+            NotificationsService {
+                events: events.clone(),
+                next_id: IdAllocator::new(),
+            },
+        )
+        .await?;
+    connection
+        .object_server()
+        .at(
+            CONTROL_OBJECT_PATH,
+            ControlService {
+                events: events.clone(),
+            },
+        )
+        .await?;
+
+    let notifications_owned = match connection
+        .request_name_with_flags(
+            NOTIFICATIONS_SERVICE_NAME,
+            RequestNameFlags::DoNotQueue.into(),
+        )
+        .await
+    {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => true,
+        // zbus turns `Exists` into `Err(NameTaken)` before we ever see it
+        // as a reply variant, and `InQueue` cannot happen with
+        // `DoNotQueue` alone — matching all three keeps this honest
+        // rather than relying on that mapping as an implementation
+        // detail (same posture as `saola-capture::dbus::serve` and
+        // `saola-session::modules::inhibit::ZbusNameClaimant::try_claim`).
+        Ok(RequestNameReply::InQueue | RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
+            tracing::info!(
+                name = NOTIFICATIONS_SERVICE_NAME,
+                "saola-notifications: {NOTIFICATIONS_SERVICE_NAME} is already owned (mako, \
+                 dunst, or some other notification daemon) — staying inert on that interface; \
+                 the control interface still serves"
+            );
+            // Nobody will ever call this object (we don't own the name),
+            // so take it back down rather than leave an unreachable
+            // registration around to confuse introspection — same rule
+            // `saola-capture::dbus::serve` follows.
+            connection
+                .object_server()
+                .remove::<NotificationsService, _>(NOTIFICATIONS_OBJECT_PATH)
+                .await?;
+            false
+        }
+        Err(err) => return Err(err),
+    };
+
+    match connection
+        .request_name_with_flags(CONTROL_SERVICE_NAME, RequestNameFlags::DoNotQueue.into())
+        .await
+    {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
+            Ok(ServeOutcome::Serving {
+                notifications_owned,
+            })
+        }
+        Ok(RequestNameReply::InQueue | RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
+            Ok(ServeOutcome::AlreadySecondInstance)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Connects to the session bus, serves both interfaces via [`serve`], and
+/// then holds the connection alive for the rest of the process's life.
+///
+/// # Why this never returns on the happy path
+///
+/// `zbus::Connection` is `#[must_use]` for a reason: dropping the last
+/// handle to it closes the socket and tears down every object the
+/// `ObjectServer` was holding. zbus dispatches each inbound call on its
+/// own task (`spawn_tasks_for_methods`, on by default), so nothing here
+/// needs to *poll* the connection directly — but something still has to
+/// keep it in scope, which is all `std::future::pending::<()>().await`
+/// does. `main.rs`'s Stage 3 body spawns this as its one background task
+/// and separately drains `events` on the receiving end (see that file's
+/// own doc comment for why the drain loop is *not* inlined here — a
+/// second background task, not this one, owns "log what came in").
+///
+/// # The one path that ends the process
+///
+/// `std::process::exit(0)` fires on exactly one condition: another
+/// `saola-notifications` is already running (Architecture: "`io.saola.
+/// Notifications1` taken -> second instance -> exit 0"). Every other
+/// failure (no session bus at all, an object-registration error) degrades
+/// to a logged error and this future simply returning — `events` is
+/// dropped with it, so `main.rs`'s drain loop sees the channel close and
+/// the process exits normally rather than being left silently running
+/// with no D-Bus surface at all.
+pub async fn run(events: mpsc::Sender<DaemonEvent>) {
+    let connection = match Connection::session().await {
+        Ok(connection) => connection,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "saola-notifications: could not connect to the session bus — the D-Bus bridge is \
+                 inert for this run"
+            );
+            return;
+        }
+    };
+
+    match serve(&connection, events).await {
+        Ok(ServeOutcome::Serving {
+            notifications_owned,
+        }) => {
+            if notifications_owned {
+                tracing::info!(
+                    "saola-notifications: serving org.freedesktop.Notifications at \
+                     {NOTIFICATIONS_OBJECT_PATH} and io.saola.Notifications1 at \
+                     {CONTROL_OBJECT_PATH}"
+                );
+            } else {
+                tracing::info!(
+                    "saola-notifications: org.freedesktop.Notifications is already owned by \
+                     another notification daemon — serving only io.saola.Notifications1 at \
+                     {CONTROL_OBJECT_PATH}"
+                );
+            }
+            std::future::pending::<()>().await;
+        }
+        Ok(ServeOutcome::AlreadySecondInstance) => {
+            tracing::info!(
+                "saola-notifications: another instance already owns io.saola.Notifications1 — \
+                 exiting cleanly rather than running two daemons"
+            );
+            std::process::exit(0);
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "saola-notifications: could not serve the D-Bus interfaces — the bridge is inert \
+                 for this run"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_starts_at_one_and_increments() {
+        let ids = IdAllocator::new();
+        assert_eq!(ids.allocate(), 1);
+        assert_eq!(ids.allocate(), 2);
+        assert_eq!(ids.allocate(), 3);
+    }
+
+    /// The load-bearing case: past `u32::MAX`, the next id must be `1`,
+    /// never the reserved `0`.
+    #[test]
+    fn allocate_skips_zero_on_wraparound() {
+        let ids = IdAllocator::starting_at(u32::MAX);
+        assert_eq!(ids.allocate(), u32::MAX);
+        assert_eq!(ids.allocate(), 1);
+        assert_eq!(ids.allocate(), 2);
+    }
+
+    #[test]
+    fn capabilities_matches_the_frozen_contract() {
+        assert_eq!(
+            capabilities(),
+            vec!["body", "actions", "icon-static", "persistence"]
+        );
+    }
+}

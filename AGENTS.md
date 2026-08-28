@@ -13,11 +13,16 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: Stage 2 done — `notifications.toml` loads at boot
+> Status: Stage 3 done — `notifications.toml` loads at boot
 > (`src/config.rs`, hand-walked `toml::Table`, never `serde::Deserialize`)
 > and live-reloads over inotify (`src/config_watch.rs`, wired but inert
-> until Stage 5's daemon calls it from its own `subscription()`). No D-Bus
-> service or UI surface exists yet. PLAN.md is the staged build plan and
+> until Stage 5's daemon calls it from its own `subscription()`). The D-Bus
+> bridge (`src/dbus.rs`) serves both frozen interfaces headlessly:
+> `NotificationsService` (`org.freedesktop.Notifications`) and
+> `ControlService` (`io.saola.Notifications1`), each forwarding a
+> `DaemonEvent` over an `iced::futures::channel::mpsc` channel that
+> `main.rs`'s plain `#[tokio::main]` runner drains and logs — no store, no
+> UI surface exists yet (Stages 4/5). PLAN.md is the staged build plan and
 > its **Context**, **Architecture**, and **Frozen external contracts**
 > sections are binding; read them before any implementation work. This
 > file summarizes the rules that must hold in every stage.
@@ -29,7 +34,7 @@ cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings   # CI gate — warnings are errors
 cargo fmt --check                           # CI gate
-cargo run                                   # needs a Wayland session (niri)
+cargo run                                   # needs a D-Bus session bus; Wayland (niri) arrives Stage 5
 ```
 
 Live-testing anything that maps surfaces happens in a **nested niri**

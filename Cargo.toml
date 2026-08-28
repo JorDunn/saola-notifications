@@ -132,16 +132,30 @@ futures = "0.3"
 # crate's dependency tree already resolves (via `iced`'s and `zbus`'s own
 # `tokio` features) rather than needing a direct `tokio` line here.
 inotify = "0.11"
-# Survey — 2026-08-28 (Stage 2). `config_watch.rs`'s debounce
-# (`tokio::time::sleep`) is the one direct use of `tokio` API surface this
-# crate's own code makes — `iced`'s and `zbus`'s `tokio` features only wire
-# *them* onto the shared runtime, they don't re-export `tokio::time`'s free
-# functions for this crate to call. `default-features = false` + `time`
-# only: no direct need for `net`/`io-util`/etc. here (`inotify`'s own
-# optional `tokio` dependency already requests `net` itself — see the
-# `inotify` entry above — and Cargo unifies both requests onto the one
-# resolved `tokio` instance the whole tree shares).
-tokio = { version = "1", default-features = false, features = ["time"] }
+# Survey — 2026-08-28 (Stage 2, extended Stage 3). Stage 2's own entry
+# covers `time` (`config_watch.rs`'s debounce sleep). Stage 3 adds `rt-
+# multi-thread` and `macros`: this crate has never built its *own* tokio
+# runtime before now — Stage 1/2's `main.rs` was fully synchronous, and
+# `iced`'s/`zbus`'s own `tokio` features only wire *them* onto a runtime
+# that has to exist first. Stage 3's `main.rs` is a plain
+# `#[tokio::main]` runner (layershell, which will eventually own the
+# runtime for real per AGENTS.md's "one tokio runtime shared by iced and
+# zbus" rule, doesn't arrive until Stage 5) — `macros` is the
+# `#[tokio::main]`/`#[tokio::test]` attribute itself, and `rt-multi-thread`
+# is what it expands to by default. `rt-multi-thread` (not bare `rt`)
+# matches `saola-session`'s own reasoning for its hand-built runtime
+# (`Cargo.toml`'s comment there): the D-Bus bridge task and the event-drain
+# loop are two independent long-lived tasks from Stage 3 on, and a
+# `current_thread` runtime would serialize them behind whichever yields
+# last. No direct need for `net`/`io-util`/etc. here (`inotify`'s and
+# `zbus`'s own optional `tokio` dependencies already request what they
+# need — see the `inotify` entry above — and Cargo unifies every request
+# onto the one resolved `tokio` instance the whole tree shares).
+tokio = { version = "1", default-features = false, features = [
+    "time",
+    "rt-multi-thread",
+    "macros",
+] }
 
 [profile.dev.package."*"]
 # Same rationale as `saola-capture`'s Cargo.toml (see its dated teaching
