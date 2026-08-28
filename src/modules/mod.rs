@@ -41,4 +41,5 @@
 //! AGENTS.md's one documented exception, and it is gated to run only while
 //! a card is actually on screen — see [`toast::Toasts::subscription`]).
 
+pub mod centre;
 pub mod toast;

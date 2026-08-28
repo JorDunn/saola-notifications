@@ -834,11 +834,6 @@ pub enum NotifyEffect {
 pub struct Store {
     toasts: Vec<ToastEntry>,
     history: Vec<Notification>,
-    #[allow(
-        dead_code,
-        reason = "written by toggle_collapsed and read by is_collapsed, both of which the \
-                  notification centre (Stage 7) is the first caller of"
-    )]
     collapsed: HashSet<String>,
 }
 
@@ -855,29 +850,16 @@ impl Store {
     /// arrived in) — Stage 7's centre view groups this by `app_name` **at
     /// view time** (PLAN.md Stage 4: "grouped by app_name at view time"),
     /// not here; this store deliberately stays flat.
-    #[allow(
-        dead_code,
-        reason = "the notification centre (Stage 7) is history's only reader; the toast surface \
-                  never shows it"
-    )]
     pub fn history(&self) -> &[Notification] {
         &self.history
     }
 
-    #[allow(
-        dead_code,
-        reason = "collapsible app groups are the notification centre's (Stage 7)"
-    )]
     pub fn is_collapsed(&self, app_name: &str) -> bool {
         self.collapsed.contains(app_name)
     }
 
     /// Flips one app's group between collapsed and expanded in the centre
     /// view.
-    #[allow(
-        dead_code,
-        reason = "collapsible app groups are the notification centre's (Stage 7)"
-    )]
     pub fn toggle_collapsed(&mut self, app_name: &str) {
         if !self.collapsed.remove(app_name) {
             self.collapsed.insert(app_name.to_string());
@@ -973,6 +955,43 @@ impl Store {
     /// screen so the caller can emit `NotificationClosed(id, 2)` for each.
     pub fn dismiss_all_toasts(&mut self) -> Vec<u32> {
         let ids: Vec<u32> = self.toasts.iter().map(|t| t.notification.id).collect();
+        self.toasts.clear();
+        ids
+    }
+
+    /// Removes one notification **everywhere** — the history list and, if it
+    /// is still on screen, the toast stack — as a dismissal from the
+    /// notification centre (Stage 7). Returns whether anything was actually
+    /// removed, so the caller can skip emitting
+    /// `NotificationClosed(id, 2)` for an id that had already gone.
+    ///
+    /// Distinct from [`Self::dismiss_toast`], which only takes a card off the
+    /// screen and deliberately leaves history alone: dismissing a *toast*
+    /// means "stop showing me this now", dismissing from the *centre* means
+    /// "I am done with this notification".
+    pub fn dismiss_notification(&mut self, id: u32) -> bool {
+        let toast_removed = self.dismiss_toast(id);
+        let before = self.history.len();
+        self.history.retain(|n| n.id != id);
+        toast_removed || self.history.len() != before
+    }
+
+    /// Clears history **and** the toast stack (the centre's clear-all row),
+    /// returning every id removed so the caller can emit
+    /// `NotificationClosed(id, 2)` for each.
+    ///
+    /// The two lists are unioned rather than concatenated: a notification
+    /// that is both on screen and in history must be reported once, and a
+    /// card whose history entry has already aged out past `history_cap` must
+    /// still be reported at all.
+    pub fn clear_all(&mut self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.history.iter().map(|n| n.id).collect();
+        for toast in &self.toasts {
+            if !ids.contains(&toast.notification.id) {
+                ids.push(toast.notification.id);
+            }
+        }
+        self.history.clear();
         self.toasts.clear();
         ids
     }
@@ -2252,5 +2271,96 @@ mod tests {
         assert!(store.is_collapsed("slack"));
         store.toggle_collapsed("slack");
         assert!(!store.is_collapsed("slack"));
+    }
+
+    // ------------------------------------------------------------------
+    // Centre dismissals (Stage 7)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dismissing_from_the_centre_removes_the_history_entry() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        store.notify(notification(1, "slack", now), 0, true, now, &limits());
+        store.notify(notification(2, "mail", now), 0, true, now, &limits());
+
+        assert!(store.dismiss_notification(1));
+        assert_eq!(
+            store.history().iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![2],
+            "only the dismissed entry leaves history"
+        );
+    }
+
+    #[test]
+    fn dismissing_from_the_centre_also_takes_the_card_off_screen() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        store.notify(notification(1, "slack", now), 0, false, now, &limits());
+
+        assert!(store.dismiss_notification(1));
+        assert!(
+            store.toasts().is_empty(),
+            "a notification dismissed in the centre cannot still be a live toast"
+        );
+        assert!(store.history().is_empty());
+    }
+
+    #[test]
+    fn dismissing_an_unknown_id_reports_nothing_was_removed() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        store.notify(notification(1, "slack", now), 0, true, now, &limits());
+
+        assert!(
+            !store.dismiss_notification(99),
+            "an id in neither history nor the stack must not claim a removal — the caller \
+             emits NotificationClosed off this answer"
+        );
+        assert_eq!(store.history().len(), 1);
+    }
+
+    #[test]
+    fn clear_all_empties_history_and_the_stack_and_reports_every_id() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        store.notify(notification(1, "slack", now), 0, false, now, &limits());
+        store.notify(notification(2, "mail", now), 0, false, now, &limits());
+        // Suppressed: in history, never on the toast stack.
+        store.notify(notification(3, "cal", now), 0, true, now, &limits());
+
+        let mut ids = store.clear_all();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(store.history().is_empty());
+        assert!(store.toasts().is_empty());
+    }
+
+    #[test]
+    fn clear_all_reports_a_live_toast_that_history_has_already_dropped() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        let tight = Limits {
+            history_cap: 1,
+            ..limits()
+        };
+        store.notify(notification(1, "slack", now), 0, false, now, &tight);
+        store.notify(notification(2, "mail", now), 0, false, now, &tight);
+
+        let mut ids = store.clear_all();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "id 1 aged out of a one-deep history but is still a card on screen, so clearing \
+             still owes it a NotificationClosed"
+        );
+        assert!(store.toasts().is_empty());
+    }
+
+    #[test]
+    fn clear_all_on_an_empty_store_reports_nothing() {
+        let mut store = Store::new();
+        assert!(store.clear_all().is_empty());
     }
 }

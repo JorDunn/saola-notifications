@@ -13,27 +13,37 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: **Stage 6 done — action pills.** `src/modules/toast.rs`'s
-> `card_view` renders style guide §6's "optional ivory action pills" below
-> the body for every action except `"default"` (`store::action_pills`);
-> `"default"` fires on card click instead of the plain dismiss
-> (`store::default_action`). Invoking an action — a pill click
-> (`Message::ActionClicked`) or a `"default"` click — always emits
-> `ActionInvoked(id, key)` (`dbus::emit_action_invoked`,
-> `Daemon::emit_action_invoked`) and additionally dismisses the toast
-> (`NotificationClosed`, reason 2) unless the notification is `resident`
-> — the policy is `store::invoke_action_policy`, a pure fn shared by
-> `Toasts::update` and `main.rs`. `card_height` reserves one extra row
-> (`gap_tight + hit_target_bar`) only when a notification actually has a
-> pill to show. Everything Stage 5 shipped (the daemon shape, the D-Bus
-> bridge, the toast envelope, config/config_watch, the store) is unchanged.
-> Remaining: the notification centre (Stage 7), the saola-capture bridge and
-> auto-DND (Stage 8), and the real `io.saola.Notifications1` properties
-> (Stage 9 — they still answer with placeholder values). PLAN.md is the
-> staged build plan and its **Context**, **Architecture**, and **Frozen
-> external contracts** sections are binding; read them before any
-> implementation work. This file summarizes the rules that must hold in
-> every stage.
+> Status: **Stage 7 done — the notification centre.**
+> `src/modules/centre.rs` is style guide §6's centre: 460 px
+> (`sizes.notification_centre_width`), anchored 72 px from the top and 26 px
+> from the right, history grouped by application into collapsible groups
+> (the theme's own `widget::group_header`, count chip included), a
+> do-not-disturb toggle reflecting manual DND, per-row dismiss and a
+> clear-all row. A row is Stage 6's `toast::card_view` at `alpha = 1.0,
+> life = None`. Dismissals emit `NotificationClosed(id, 2)`
+> (`Store::dismiss_notification`, `Store::clear_all`).
+>
+> The surface **hugs its content**: `centre_height` is a pure function of
+> the grouped model, clamped to §6's `100% - 98px`. Because
+> `iced_layershell` 0.19 exposes no output geometry, the daemon **measures**
+> that clamp once per process — the first open spawns the centre anchored
+> top *and* bottom at zero height (the layer-shell protocol's own "stretch
+> me"), reads the configured height off the `Opened` event, and respawns at
+> the hug height. See `main.rs`'s `CentreMode` / `CentreClamp`. Resizing is
+> unmap-then-respawn, keyed on the mode, and recomputed only at
+> open/model-change boundaries.
+>
+> Everything Stages 5 and 6 shipped is unchanged apart from one fix:
+> `Daemon::on_notify` now resyncs **both** surfaces, because a `Notify`
+> always lands in history and therefore always changes an open centre's
+> height. Remaining: the saola-capture bridge and auto-DND (Stage 8), and
+> the real `io.saola.Notifications1` properties (Stage 9 — they still answer
+> with placeholder values; `CentreOpen` reads `Daemon::centre.is_open()` and
+> `DndManual` reads `Daemon::dnd_manual`, both written in exactly one place
+> each). PLAN.md is the staged build plan and its **Context**,
+> **Architecture**, and **Frozen external contracts** sections are binding;
+> read them before any implementation work. This file summarizes the rules
+> that must hold in every stage.
 
 ## Commands
 
@@ -83,6 +93,18 @@ confirmation needs a real niri session.
   - `Centre`: exists only while open, `KeyboardInteractivity::OnDemand`,
     closes on Escape and focus loss, height hugs content via a pure
     `centre_height(theme, &model)` clamped to `output_height − 98`.
+    That clamp is **measured, never assumed** (Stage 7): `iced_layershell`
+    0.19 exposes no output geometry, so the first open of each process
+    spawns the centre in `CentreMode::Measure` — anchored Top|Bottom|Right,
+    zero height, input-transparent, painting nothing — which the layer-shell
+    protocol requires the compositor to stretch, and the `Opened` event's
+    height *is* `output_height − 98`. It then respawns in `CentreMode::Hug`.
+    Never invent a fallback screen height; `CentreClamp::Unavailable` (an
+    unclamped, possibly overhanging centre) is the documented answer when a
+    compositor will not stretch.
+  - **Every model change that touches history must resync the centre**, not
+    just the toast stack — a `Notify` lands in history even when DND
+    suppresses its toast. `Daemon::on_notify` batches both syncs.
 - **D-Bus bridge** (capture's `dbus.rs` shape): served interfaces hold an
   `iced::futures::channel::mpsc::Sender<DaemonEvent>`; a
   `Subscription::run` worker connects, registers the object server, claims

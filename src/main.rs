@@ -147,12 +147,68 @@ enum SurfaceRole {
     /// unmap-then-respawn whenever the stack's declared height changes, and
     /// unmapped once the last card leaves.
     Toasts,
-    /// The notification centre (Stage 7). The registry arm exists now so
-    /// that [`Daemon::view`] has a total match over the roles this daemon
-    /// will have, rather than growing a new one later; nothing spawns a
-    /// centre surface yet.
-    #[allow(dead_code, reason = "Stage 7 spawns the first centre surface")]
+    /// The notification centre (`modules::centre`). Mapped by
+    /// [`Daemon::sync_centre_surface`] while [`modules::centre::Centre`] says
+    /// it is open, resized by the same unmap-then-respawn dance the toast
+    /// surface uses, and unmapped the moment it closes.
     Centre,
+}
+
+/// How the centre surface is currently asking to be sized.
+///
+/// # Why a hug-height surface needs a measuring mode at all (teaching note)
+///
+/// Style guide §6 caps the centre at `calc(100% - 98px)` — the output's
+/// height, less `sizes.popover_top` (72) above it and
+/// `sizes.panel_margin_islands` (26) below. `iced_layershell` 0.19 gives an
+/// application no way to *ask* how tall the output is: there is no output
+/// event, and the size a surface reports back is the size it was given.
+///
+/// So the daemon measures it, once, using the layer-shell protocol's own
+/// rule: a surface anchored to two **opposite** edges with a size of zero in
+/// that dimension is stretched by the compositor to fill the space between
+/// its margins. [`CentreMode::Measure`] is exactly that surface — anchored
+/// top *and* bottom, zero height, input-transparent and painting nothing —
+/// and the size the compositor configures it at *is* `output_height − 98`,
+/// straight from the compositor rather than from a constant in this file.
+/// [`Daemon::update`] records it as [`CentreClamp::Measured`] and immediately
+/// re-syncs, which respawns the surface in [`CentreMode::Hug`] at the height
+/// the content actually wants. Every later open goes straight to `Hug`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CentreMode {
+    /// Anchored Top|Bottom|Right at zero height: one frame of "compositor,
+    /// how much room is there?".
+    Measure,
+    /// Anchored Top|Right at exactly this many logical pixels — the content's
+    /// own height, clamped (see [`modules::centre::surface_height`]).
+    Hug(u32),
+}
+
+/// The centre surface the daemon currently has mapped, and what it was asked
+/// for. Kept as one value so the two can never drift apart.
+#[derive(Debug, Clone, Copy)]
+struct CentreSurface {
+    id: window::Id,
+    mode: CentreMode,
+}
+
+/// What the daemon knows about §6's `100% - 98px` clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CentreClamp {
+    /// Not measured yet — the next centre open runs in
+    /// [`CentreMode::Measure`] first.
+    Unknown,
+    /// The compositor stretched a [`CentreMode::Measure`] surface to this
+    /// many logical pixels: `output_height − sizes.popover_top −
+    /// sizes.panel_margin_islands`, which is §6's clamp exactly.
+    Measured(u32),
+    /// The measuring surface came back with a useless height (zero), so this
+    /// compositor will not answer the question. The centre falls back to its
+    /// unclamped hug height from then on: content past the screen bottom is
+    /// unreachable, which is a degradation rather than a failure, and it is
+    /// logged once. No constant is invented to stand in for the real
+    /// height — guessing one would be worse than the honest overhang.
+    Unavailable,
 }
 
 /// The toast surface's layer-shell settings, sized for the stack's current
@@ -194,6 +250,57 @@ fn toast_surface_settings(theme: &Theme, height: u32) -> NewLayerShellSettings {
     }
 }
 
+/// The centre surface's layer-shell settings for one [`CentreMode`].
+///
+/// Geometry is §6's "Notification centre", every number a token:
+/// `sizes.notification_centre_width` (460) wide, `sizes.popover_top` (72)
+/// below the screen top, `sizes.panel_margin_islands` (26) in from the right
+/// edge — the same borrowed screen-edge inset the toast surface uses, and the
+/// same entry in `docs/UPSTREAM-THEME-DEBT.md`.
+///
+/// `KeyboardInteractivity::OnDemand` is binding for the `Hug` surface
+/// (AGENTS.md / PLAN.md Stage 7): the centre may take the keyboard when the
+/// user reaches for it, which is what makes Escape reach this process at all.
+/// The `Measure` surface takes `None` — it exists for a frame, paints
+/// nothing, and must not steal focus on its way past — and is
+/// `events_transparent`, so the full-height strip it occupies swallows no
+/// pointer input while it is up.
+fn centre_surface_settings(theme: &Theme, mode: CentreMode) -> NewLayerShellSettings {
+    let width = theme.sizes.notification_centre_width.round() as u32;
+    let top = theme.sizes.popover_top.round() as i32;
+    let edge = theme.sizes.panel_margin_islands.round() as i32;
+    // Named so `niri msg layers` can tell this surface from the toast stack
+    // during a live check.
+    let namespace = Some("saola-notifications-centre".to_string());
+
+    match mode {
+        CentreMode::Measure => NewLayerShellSettings {
+            // Top *and* bottom: the anchor pair is what makes the zero height
+            // below mean "stretch me" rather than "give me nothing".
+            anchor: Anchor::Top | Anchor::Bottom | Anchor::Right,
+            layer: Layer::Overlay,
+            size: Some((width, 0)),
+            margin: Some((top, edge, edge, 0)),
+            exclusive_zone: Some(0),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            events_transparent: true,
+            namespace,
+            ..Default::default()
+        },
+        CentreMode::Hug(height) => NewLayerShellSettings {
+            anchor: Anchor::Top | Anchor::Right,
+            layer: Layer::Overlay,
+            size: Some((width, height)),
+            margin: Some((top, edge, 0, 0)),
+            exclusive_zone: Some(0),
+            keyboard_interactivity: KeyboardInteractivity::OnDemand,
+            events_transparent: false,
+            namespace,
+            ..Default::default()
+        },
+    }
+}
+
 // ---------------------------------------------------------------------
 // The daemon
 // ---------------------------------------------------------------------
@@ -216,6 +323,13 @@ struct Daemon {
     store: store::Store,
     /// The toast surface's own view state (which card the pointer is in).
     toasts: modules::toast::Toasts,
+    /// The notification centre's own view state — whether it is open, and
+    /// nothing else. **Stage 9's `CentreOpen` property reads
+    /// `self.centre.is_open()`**; every place that changes it is in this file
+    /// (the three `*Centre` arms) or in `modules::centre::Centre::update`
+    /// (Escape and focus loss), so those are the sites to emit
+    /// `PropertiesChanged` from.
+    centre: modules::centre::Centre,
     windows: HashMap<window::Id, SurfaceRole>,
     /// The toast surface's Id, while one is mapped.
     toast_surface: Option<window::Id>,
@@ -224,6 +338,12 @@ struct Daemon {
     /// card arriving or leaving is noticed even though the surface's own Id
     /// does not change on its own. See [`Daemon::sync_toast_surface`].
     toast_surface_height: u32,
+    /// The centre surface, while one is mapped, and what it was spawned for.
+    /// See [`Daemon::sync_centre_surface`].
+    centre_surface: Option<CentreSurface>,
+    /// What the daemon knows about §6's `100% - 98px` clamp — measured once,
+    /// from the compositor. See [`CentreClamp`].
+    centre_clamp: CentreClamp,
     /// The session-bus connection, once [`dbus_worker_stream`] has one. Held
     /// so `update` can emit signals through it (see [`Daemon::emit_closed`]);
     /// `None` until `BusReady` arrives, and every emitter degrades to a
@@ -261,9 +381,12 @@ impl Daemon {
             limits,
             store: store::Store::new(),
             toasts: modules::toast::Toasts::default(),
+            centre: modules::centre::Centre::default(),
             windows: HashMap::new(),
             toast_surface: None,
             toast_surface_height: 0,
+            centre_surface: None,
+            centre_clamp: CentreClamp::Unknown,
             connection: None,
             recording_dnd: false,
         };
@@ -322,25 +445,61 @@ impl Daemon {
             }
 
             Message::SetDnd(manual) => {
-                self.dnd_manual = manual;
-                tracing::info!(
-                    manual,
-                    effective = store::effective_dnd(manual, self.recording_dnd),
-                    "saola-notifications: do-not-disturb changed"
-                );
+                self.set_dnd(manual);
                 Task::none()
             }
 
-            // Stage 7 owns the centre surface. Logged rather than silently
-            // dropped so a `busctl` call against the frozen control interface
-            // still shows evidence that it landed.
-            Message::ToggleCentre | Message::OpenCentre | Message::CloseCentre => {
-                tracing::info!(
-                    "saola-notifications: the notification centre arrives in Stage 7 — the \
-                     control method was received and had no surface to act on"
-                );
-                Task::none()
+            Message::ToggleCentre => {
+                self.centre.toggle();
+                self.sync_centre_surface()
             }
+
+            Message::OpenCentre => {
+                self.centre.set_open(true);
+                self.sync_centre_surface()
+            }
+
+            Message::CloseCentre => {
+                self.centre.set_open(false);
+                self.sync_centre_surface()
+            }
+
+            Message::Centre(inner) => {
+                let surface = self.centre_surface.map(|surface| surface.id);
+                let action = self.centre.update(inner, &mut self.store, surface);
+                let emit = match action {
+                    modules::centre::Action::None | modules::centre::Action::Close => Task::none(),
+                    // §6 dismissals from the centre are always
+                    // user-dismissals: reason 2.
+                    modules::centre::Action::Closed(ids) => {
+                        self.emit_closed(&ids, store::CloseReason::UserDismissed)
+                    }
+                    modules::centre::Action::Invoked { id, key, closed } => {
+                        let invoked = self.emit_action_invoked(id, key);
+                        if closed {
+                            let dismissed =
+                                self.emit_closed(&[id], store::CloseReason::UserDismissed);
+                            Task::batch([invoked, dismissed])
+                        } else {
+                            invoked
+                        }
+                    }
+                    modules::centre::Action::Dnd(manual) => {
+                        self.set_dnd(manual);
+                        Task::none()
+                    }
+                };
+                // Both surfaces: a dismissal or a clear-all in the centre can
+                // take a card off the toast stack as well, and every one of
+                // these messages can change the centre's own height.
+                Task::batch([emit, self.sync_toast_surface(), self.sync_centre_surface()])
+            }
+
+            // The compositor answered the measuring surface (see
+            // [`CentreMode::Measure`]). Nothing else in this daemon cares
+            // what size a surface was configured at — every other surface was
+            // spawned at a size this file chose.
+            Message::SurfaceSized(id, height) => self.on_surface_sized(id, height),
 
             Message::Toast(inner) => {
                 let now = Instant::now();
@@ -436,7 +595,12 @@ impl Daemon {
             self.store.pause_toast(hovered, now);
         }
 
-        self.sync_toast_surface()
+        // Both surfaces. A `Notify` always lands in history — even one
+        // suppressed by do-not-disturb, which touches the toast stack not at
+        // all — so an open centre has just grown a row and needs to be
+        // respawned a card taller. This is the one path that changes the
+        // centre's height without the user touching the centre.
+        Task::batch([self.sync_toast_surface(), self.sync_centre_surface()])
     }
 
     /// Every `id` here is one this daemon spawned itself (registered
@@ -449,8 +613,24 @@ impl Daemon {
                 .toasts
                 .view(&self.theme, &self.store, Instant::now())
                 .map(Message::Toast),
-            // Stage 7.
-            Some(SurfaceRole::Centre) | None => Space::new().into(),
+            Some(SurfaceRole::Centre) => {
+                // A measuring surface paints nothing on purpose: it exists
+                // only to be told how tall it was allowed to be, and it
+                // covers most of the screen's right edge while it does.
+                if matches!(
+                    self.centre_surface,
+                    Some(CentreSurface {
+                        mode: CentreMode::Measure,
+                        ..
+                    })
+                ) {
+                    return Space::new().into();
+                }
+                self.centre
+                    .view(&self.theme, &self.store, self.dnd_manual)
+                    .map(Message::Centre)
+            }
+            None => Space::new().into(),
         }
     }
 
@@ -464,9 +644,35 @@ impl Daemon {
             None => Subscription::none(),
         };
 
+        // Only while a measuring surface is actually up. Gating it here means
+        // the daemon can never learn a clamp off a `Hug` surface — whose
+        // configured height is simply the height this file asked for, and
+        // recording *that* as the clamp would freeze the centre at whatever
+        // it happened to be the first time it opened.
+        let surface_size = if matches!(
+            self.centre_surface,
+            Some(CentreSurface {
+                mode: CentreMode::Measure,
+                ..
+            })
+        ) {
+            iced::event::listen_with(|event, _status, id| match event {
+                iced::Event::Window(window::Event::Opened { size, .. })
+                | iced::Event::Window(window::Event::Resized(size)) => Some(Message::SurfaceSized(
+                    id,
+                    size.height.round().max(0.0) as u32,
+                )),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             Subscription::run(dbus_worker_stream),
             self.toasts.subscription(&self.store).map(Message::Toast),
+            self.centre.subscription().map(Message::Centre),
+            surface_size,
             config,
         ])
     }
@@ -567,6 +773,133 @@ impl Daemon {
             // Already mapped at the right size.
             _ => Task::none(),
         }
+    }
+
+    /// The mode the centre surface *should* be in right now, given the model
+    /// and what the daemon knows about the clamp. `None` means "no centre
+    /// surface at all".
+    fn wanted_centre_mode(&self) -> Option<CentreMode> {
+        if !self.centre.is_open() {
+            return None;
+        }
+        Some(match self.centre_clamp {
+            CentreClamp::Unknown => CentreMode::Measure,
+            CentreClamp::Measured(max) => CentreMode::Hug(modules::centre::surface_height(
+                &self.theme,
+                &modules::centre::group_history(&self.store),
+                Some(max),
+            )),
+            CentreClamp::Unavailable => CentreMode::Hug(modules::centre::surface_height(
+                &self.theme,
+                &modules::centre::group_history(&self.store),
+                None,
+            )),
+        })
+    }
+
+    /// Map, resize, or unmap the centre surface so its declared size always
+    /// matches what the centre actually draws — [`Self::sync_toast_surface`]'s
+    /// twin, and the same unmap-then-respawn dance for the same reason (a
+    /// layer-shell surface takes pointer input across its whole declared
+    /// area, so the declared area has to equal the painted one).
+    ///
+    /// # What a respawn costs here, and why it is still the right trade
+    /// (teaching note)
+    ///
+    /// More than it does for a toast. The centre can hold keyboard focus and
+    /// a scroll position, and a respawn drops both. PLAN.md's instruction is
+    /// therefore "recompute height only on open/model-change boundaries",
+    /// which is exactly when this is called — never on a timer, and never on
+    /// a frame. Keying the comparison on the *mode* (which carries the
+    /// height) means a model change that does not change the height — an
+    /// expanded group replacing an equally tall one — costs nothing at all.
+    ///
+    /// The alternative PLAN.md offers as a fallback is one full-clamp-height
+    /// surface that never resizes; it was not taken, because a 460 px column
+    /// down the whole right edge of the screen would swallow every click in
+    /// the empty space under the panel for as long as the centre is open, and
+    /// the centre closes on focus loss — so those swallowed clicks are
+    /// precisely the ones a user makes to dismiss it.
+    fn sync_centre_surface(&mut self) -> Task<Message> {
+        let wanted = self.wanted_centre_mode();
+        tracing::debug!(
+            open = self.centre.is_open(),
+            ?wanted,
+            mapped = ?self.centre_surface.map(|surface| surface.mode),
+            clamp = ?self.centre_clamp,
+            "saola-notifications: centre surface sync"
+        );
+
+        match (self.centre_surface, wanted) {
+            (None, None) => Task::none(),
+            (None, Some(mode)) => self.spawn_centre_surface(mode),
+            (Some(surface), None) => {
+                self.centre_surface = None;
+                self.remove_surface(surface.id)
+            }
+            (Some(surface), Some(mode)) if surface.mode != mode => {
+                let remove = self.remove_surface(surface.id);
+                let spawn = self.spawn_centre_surface(mode);
+                Task::batch([remove, spawn])
+            }
+            // Already mapped in the right mode at the right size.
+            _ => Task::none(),
+        }
+    }
+
+    fn spawn_centre_surface(&mut self, mode: CentreMode) -> Task<Message> {
+        let settings = centre_surface_settings(&self.theme, mode);
+        let (id, task) = self.spawn_surface(SurfaceRole::Centre, settings);
+        self.centre_surface = Some(CentreSurface { id, mode });
+        task
+    }
+
+    /// The compositor configured a surface at some size. The only surface
+    /// this daemon does not already know the size of is the centre's
+    /// [`CentreMode::Measure`] surface — see [`CentreClamp`] for what the
+    /// answer means and why it is asked for this way.
+    fn on_surface_sized(&mut self, id: window::Id, height: u32) -> Task<Message> {
+        let Some(surface) = self.centre_surface else {
+            return Task::none();
+        };
+        if surface.id != id || surface.mode != CentreMode::Measure {
+            return Task::none();
+        }
+
+        self.centre_clamp = if height > 0 {
+            tracing::info!(
+                clamp = height,
+                popover_top = self.theme.sizes.popover_top,
+                screen_edge = self.theme.sizes.panel_margin_islands,
+                "saola-notifications: the compositor measured the notification centre's maximum \
+                 height (style guide §6's `100% - 98px`)"
+            );
+            CentreClamp::Measured(height)
+        } else {
+            tracing::warn!(
+                "saola-notifications: the compositor did not stretch the notification centre's \
+                 measuring surface, so its maximum height is unknown — the centre will hug its \
+                 content unclamped and can overhang the screen bottom"
+            );
+            CentreClamp::Unavailable
+        };
+
+        self.sync_centre_surface()
+    }
+
+    /// Manual do-not-disturb, from either `io.saola.Notifications1.SetDnd` or
+    /// the centre's own toggle. **Stage 9's `DndManual` and `DndActive`
+    /// properties read `self.dnd_manual` and
+    /// `store::effective_dnd(self.dnd_manual, self.recording_dnd)`**; this is
+    /// the one place `dnd_manual` is written, so it is the one place a
+    /// `PropertiesChanged` has to be emitted from.
+    fn set_dnd(&mut self, manual: bool) {
+        self.dnd_manual = manual;
+        tracing::info!(
+            manual,
+            effective = store::effective_dnd(manual, self.recording_dnd),
+            "saola-notifications: do-not-disturb changed"
+        );
     }
 
     /// Emit `NotificationClosed(id, reason)` for each id, off the update
@@ -677,11 +1010,12 @@ enum Message {
     Notify(NotifyRequest),
     /// `org.freedesktop.Notifications.CloseNotification(id)`.
     CloseNotification(u32),
-    /// `io.saola.Notifications1.ToggleCentre` — Stage 7.
+    /// `io.saola.Notifications1.ToggleCentre` — "toggling while open closes".
     ToggleCentre,
-    /// `io.saola.Notifications1.OpenCentre` — Stage 7.
+    /// `io.saola.Notifications1.OpenCentre`. Idempotent: opening an open
+    /// centre changes nothing and never spawns a second surface.
     OpenCentre,
-    /// `io.saola.Notifications1.CloseCentre` — Stage 7.
+    /// `io.saola.Notifications1.CloseCentre`.
     CloseCentre,
     /// `io.saola.Notifications1.SetDnd(b)` — manual do-not-disturb only.
     SetDnd(bool),
@@ -691,6 +1025,14 @@ enum Message {
     Dismiss(u32),
     /// Wraps [`modules::toast::Message`] — the stack's tick, hover and click.
     Toast(modules::toast::Message),
+    /// Wraps [`modules::centre::Message`] — the centre's group toggles,
+    /// dismissals, DND toggle, Escape and focus loss.
+    Centre(modules::centre::Message),
+    /// The compositor configured a surface at a size this daemon did not
+    /// choose. Only the centre's [`CentreMode::Measure`] surface is ever in
+    /// that position; carries the surface's id and its configured height in
+    /// logical pixels. See [`CentreClamp`].
+    SurfaceSized(window::Id, u32),
     /// Wraps [`config_watch::Message`] — `notifications.toml` changed on disk
     /// and reparsed.
     Config(config_watch::Message),
@@ -976,6 +1318,327 @@ mod tests {
                 label: "Yes".to_string()
             }],
             "an action key with no label is dropped, never given an invented one"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Centre surface geometry (Stage 7)
+    // ------------------------------------------------------------------
+
+    /// A `Daemon` whose centre is open with a known clamp and a surface
+    /// already mapped, ready to be handed a `Notify`.
+    ///
+    /// `Daemon::boot` reads the real `notifications.toml` if the user has
+    /// one, so `limits.history_cap` is pinned here rather than trusted — a
+    /// machine configured with `history-cap = 0` must not turn this into a
+    /// test about that.
+    fn open_centre_daemon() -> Daemon {
+        let (mut daemon, _boot) = Daemon::boot();
+        daemon.limits.history_cap = 100;
+        // Tall enough that nothing in these tests is clamped: the assertions
+        // are about the height *changing*, not about the clamp.
+        daemon.centre_clamp = CentreClamp::Measured(4000);
+        daemon.centre.set_open(true);
+        let _ = daemon.sync_centre_surface();
+        daemon
+    }
+
+    fn notify_request(id: u32, app_name: &str) -> NotifyRequest {
+        NotifyRequest {
+            id,
+            replaces_id: 0,
+            app_name: app_name.to_string(),
+            app_icon: String::new(),
+            summary: "Summary".to_string(),
+            body: "Body".to_string(),
+            actions: Vec::new(),
+            urgency: store::Urgency::Normal,
+            image: None,
+            expire_timeout: -1,
+            transient: false,
+            resident: false,
+        }
+    }
+
+    fn centre_mode(daemon: &Daemon) -> CentreMode {
+        daemon
+            .centre_surface
+            .expect("the centre is open, so a surface is mapped")
+            .mode
+    }
+
+    /// Regression: `on_notify` used to resync only the toast surface, so a
+    /// notification arriving while the centre was open left the centre
+    /// surface at its old height and the new row was clipped off the bottom.
+    /// A `Notify` always lands in history, so it always changes an open
+    /// centre's height.
+    #[test]
+    fn a_notification_arriving_resizes_an_open_centre() {
+        let mut daemon = open_centre_daemon();
+        let before = centre_mode(&daemon);
+
+        let _ = daemon.on_notify(notify_request(1, "slack"));
+
+        assert_ne!(
+            centre_mode(&daemon),
+            before,
+            "the centre grew a group header and a card; its surface has to grow with it"
+        );
+    }
+
+    /// The same, for a notification do-not-disturb suppressed: it touches the
+    /// toast stack not at all, which is exactly why the toast surface's own
+    /// resync cannot be the one that covers this.
+    #[test]
+    fn a_suppressed_notification_still_resizes_an_open_centre() {
+        let mut daemon = open_centre_daemon();
+        daemon.set_dnd(true);
+        let before = centre_mode(&daemon);
+
+        let _ = daemon.on_notify(notify_request(1, "slack"));
+
+        assert!(
+            daemon.store.toasts().is_empty(),
+            "do-not-disturb keeps it off the stack — the premise of this test"
+        );
+        assert_ne!(
+            centre_mode(&daemon),
+            before,
+            "suppressed notifications still land in history, and history is what the centre shows"
+        );
+    }
+
+    /// A second notification from an app already in the centre adds a row to
+    /// that app's group rather than a new group, so the centre grows by less
+    /// than the first one did — and still grows.
+    #[test]
+    fn a_second_notification_from_one_app_grows_the_centre_by_one_row() {
+        let mut daemon = open_centre_daemon();
+        let _ = daemon.on_notify(notify_request(1, "slack"));
+        let one_row = centre_mode(&daemon);
+
+        let _ = daemon.on_notify(notify_request(2, "slack"));
+        let two_rows = centre_mode(&daemon);
+
+        let (CentreMode::Hug(one), CentreMode::Hug(two)) = (one_row, two_rows) else {
+            panic!("a measured clamp means the centre is in Hug mode: {one_row:?} {two_rows:?}");
+        };
+        assert!(two > one, "a second row makes the centre taller");
+        assert!(
+            two - one < one,
+            "and by less than the first row cost, because it reuses slack's group header"
+        );
+    }
+
+    /// The centre is closed by default, so nothing above may spawn a surface
+    /// for a daemon nobody opened.
+    #[test]
+    fn a_notification_arriving_with_the_centre_closed_maps_no_centre_surface() {
+        let (mut daemon, _boot) = Daemon::boot();
+        daemon.limits.history_cap = 100;
+
+        let _ = daemon.on_notify(notify_request(1, "slack"));
+
+        assert!(!daemon.centre.is_open());
+        assert!(daemon.centre_surface.is_none());
+    }
+
+    /// The measuring surface runs once per process: after the clamp is known
+    /// every open goes straight to a hug-height surface.
+    #[test]
+    fn the_centre_measures_once_and_then_hugs() {
+        let (mut daemon, _boot) = Daemon::boot();
+
+        daemon.centre.set_open(true);
+        let _ = daemon.sync_centre_surface();
+        assert_eq!(
+            centre_mode(&daemon),
+            CentreMode::Measure,
+            "the first open has no clamp to work from"
+        );
+
+        let measuring = daemon.centre_surface.expect("mapped").id;
+        let _ = daemon.on_surface_sized(measuring, 982);
+        assert_eq!(daemon.centre_clamp, CentreClamp::Measured(982));
+        assert!(matches!(centre_mode(&daemon), CentreMode::Hug(_)));
+
+        daemon.centre.set_open(false);
+        let _ = daemon.sync_centre_surface();
+        daemon.centre.set_open(true);
+        let _ = daemon.sync_centre_surface();
+        assert!(
+            matches!(centre_mode(&daemon), CentreMode::Hug(_)),
+            "the second open never measures again"
+        );
+    }
+
+    /// A compositor that will not stretch the measuring surface leaves the
+    /// centre unclamped rather than clamped to nothing.
+    #[test]
+    fn a_compositor_that_answers_zero_leaves_the_centre_unclamped() {
+        let (mut daemon, _boot) = Daemon::boot();
+        daemon.centre.set_open(true);
+        let _ = daemon.sync_centre_surface();
+        let measuring = daemon.centre_surface.expect("mapped").id;
+
+        let _ = daemon.on_surface_sized(measuring, 0);
+
+        assert_eq!(daemon.centre_clamp, CentreClamp::Unavailable);
+        assert!(
+            matches!(centre_mode(&daemon), CentreMode::Hug(_)),
+            "it still opens — an overhanging centre beats no centre"
+        );
+    }
+
+    /// Only the measuring surface teaches the daemon a clamp. A hug-height
+    /// surface reports back the height this file asked for, and recording
+    /// *that* would freeze the centre at whatever size it first opened at.
+    #[test]
+    fn a_hug_surfaces_configured_size_never_becomes_the_clamp() {
+        let mut daemon = open_centre_daemon();
+        let hug = daemon.centre_surface.expect("mapped").id;
+
+        let _ = daemon.on_surface_sized(hug, 126);
+
+        assert_eq!(daemon.centre_clamp, CentreClamp::Measured(4000));
+    }
+
+    /// Toggling an open centre closes it, and closing unmaps its surface —
+    /// PLAN.md Stage 7's "toggling while open closes", end to end.
+    #[test]
+    fn toggling_an_open_centre_unmaps_its_surface() {
+        let mut daemon = open_centre_daemon();
+        assert!(daemon.centre_surface.is_some());
+
+        daemon.centre.toggle();
+        let _ = daemon.sync_centre_surface();
+
+        assert!(!daemon.centre.is_open());
+        assert!(daemon.centre_surface.is_none());
+    }
+
+    /// Opening an already-open centre must not spawn a second surface.
+    #[test]
+    fn opening_an_open_centre_keeps_the_one_surface_it_has() {
+        let mut daemon = open_centre_daemon();
+        let first = daemon.centre_surface.expect("mapped").id;
+
+        daemon.centre.set_open(true);
+        let _ = daemon.sync_centre_surface();
+
+        assert_eq!(
+            daemon.centre_surface.expect("still mapped").id,
+            first,
+            "nothing changed, so nothing is respawned"
+        );
+    }
+
+    #[test]
+    fn the_centre_is_460_wide_at_the_height_it_was_asked_for() {
+        let theme = Theme::saola();
+        let settings = centre_surface_settings(&theme, CentreMode::Hug(320));
+
+        assert_eq!(
+            settings.size,
+            Some((460, 320)),
+            "§6: the notification centre is 460px (sizes.notification_centre_width)"
+        );
+    }
+
+    #[test]
+    fn the_centre_is_anchored_72_from_the_top_and_26_from_the_right() {
+        let theme = Theme::saola();
+        let settings = centre_surface_settings(&theme, CentreMode::Hug(320));
+
+        assert_eq!(
+            settings.margin,
+            Some((72, 26, 0, 0)),
+            "§6: anchored 72px from the top and 26px from the right (top, right, bottom, left)"
+        );
+        assert_eq!(settings.anchor, Anchor::Top | Anchor::Right);
+        assert_eq!(settings.exclusive_zone, Some(0));
+    }
+
+    #[test]
+    fn the_centre_takes_the_keyboard_on_demand_and_the_pointer_always() {
+        let theme = Theme::saola();
+        let settings = centre_surface_settings(&theme, CentreMode::Hug(320));
+
+        assert_eq!(
+            settings.keyboard_interactivity,
+            KeyboardInteractivity::OnDemand,
+            "PLAN.md Stage 7 / AGENTS.md: the centre is OnDemand, never Exclusive"
+        );
+        assert!(
+            !settings.events_transparent,
+            "every control in the centre has to be clickable"
+        );
+    }
+
+    #[test]
+    fn the_measuring_surface_asks_the_compositor_to_stretch_it() {
+        let theme = Theme::saola();
+        let settings = centre_surface_settings(&theme, CentreMode::Measure);
+
+        assert_eq!(
+            settings.size,
+            Some((460, 0)),
+            "zero height is the layer-shell protocol's own 'compositor, you decide'"
+        );
+        assert_eq!(
+            settings.anchor,
+            Anchor::Top | Anchor::Bottom | Anchor::Right,
+            "the opposite-edge anchor pair is what makes a zero height mean 'stretch'"
+        );
+        assert_eq!(
+            settings.margin,
+            Some((72, 26, 26, 0)),
+            "72 above and 26 below is §6's own `100% - 98px`, expressed as margins"
+        );
+    }
+
+    #[test]
+    fn the_measuring_surface_grabs_neither_the_keyboard_nor_the_pointer() {
+        let theme = Theme::saola();
+        let settings = centre_surface_settings(&theme, CentreMode::Measure);
+
+        assert_eq!(
+            settings.keyboard_interactivity,
+            KeyboardInteractivity::None,
+            "a surface that exists for one frame must not steal focus on its way past"
+        );
+        assert!(
+            settings.events_transparent,
+            "it covers the whole right edge of the screen and must swallow nothing"
+        );
+    }
+
+    #[test]
+    fn the_measured_clamp_is_the_style_guides_own_98_pixels() {
+        let theme = Theme::saola();
+        let Some((top, _right, bottom, _left)) =
+            centre_surface_settings(&theme, CentreMode::Measure).margin
+        else {
+            panic!("the measuring surface must carry margins — they are the whole measurement");
+        };
+
+        assert_eq!(
+            top + bottom,
+            98,
+            "§6: `max-height: calc(100% - 98px)` = sizes.popover_top (72) + \
+             sizes.panel_margin_islands (26)"
+        );
+    }
+
+    #[test]
+    fn the_toast_and_the_centre_share_one_screen_edge_inset() {
+        let theme = Theme::saola();
+        let toast = toast_surface_settings(&theme, 95).margin;
+        let centre = centre_surface_settings(&theme, CentreMode::Hug(320)).margin;
+
+        assert_eq!(
+            toast, centre,
+            "§6 anchors both 72px from the top and 26px from the right — one inset, two surfaces"
         );
     }
 
