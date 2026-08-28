@@ -30,6 +30,16 @@
 mod config;
 mod config_watch;
 mod dbus;
+// Stage 4's pure notification model: hint parsing, markup stripping, DND
+// and expiry policy, and the in-memory toast/history `Store`. Nothing in
+// this crate builds a `Store` or calls its methods yet — `main.rs` is still
+// Stage 3's headless D-Bus-only runner, and Stage 5's `iced::Daemon::update`
+// is the first real caller (see `.claude/handoffs/handoff_stage_4.md` for
+// the exact call sites). Same "inert until its consuming stage exists"
+// shape as `config_watch.rs`'s Stage 2 allow and `dbus.rs`'s `DaemonEvent`
+// Stage 3 allow — remove this once Stage 5 wires it in for real.
+#[allow(dead_code)]
+mod store;
 
 use futures::StreamExt;
 use iced::futures::channel::mpsc;

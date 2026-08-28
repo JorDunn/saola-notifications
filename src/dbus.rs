@@ -78,7 +78,9 @@ use iced::futures::channel::mpsc;
 use zbus::Connection;
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::OwnedValue;
+use zbus::zvariant::{OwnedValue, Structure, Value};
+
+use crate::store;
 
 /// The well-known bus name and object path for the freedesktop
 /// notification-daemon contract every notifying app already speaks.
@@ -480,6 +482,121 @@ impl ControlService {
 }
 
 // ============================================================================
+// Hint conversion — the only bridge between zbus's wire types and
+// store.rs's plain, zbus-free HintValue. store.rs's own module doc comment
+// carries the "no zbus imports" rule; this is the one place that rule's
+// other half lives — the function that actually reads a
+// `zbus::zvariant::OwnedValue` and produces the plain value store.rs
+// consumes. Stage 5 calls `hints_to_plain` once per `DaemonEvent::Notify`,
+// then hands the result to `store::parse_hints`.
+// ============================================================================
+
+/// Converts every hint this crate knows how to parse from
+/// `DaemonEvent::Notify`'s raw `hints: HashMap<String, OwnedValue>` into
+/// `store.rs`'s own [`store::HintValue`], keyed by the same hint name.
+///
+/// A hint whose wire value isn't one of the shapes [`hint_value_from_owned`]
+/// understands (an `i64` `sender-pid`, a `u32` `x`/`y`, …) is silently
+/// dropped from the resulting map rather than erroring — `store::
+/// parse_hints` only ever looks up a small fixed set of key names, so a
+/// hint this crate has no use for either way just isn't present, exactly as
+/// if the sender had never included it.
+///
+/// `#[allow(dead_code)]`: nothing calls this outside `#[cfg(test)]` yet —
+/// same "inert until its consuming stage exists" shape as `DaemonEvent`'s
+/// own Stage 3 allow, just above in this file. Stage 5 calls this once per
+/// `DaemonEvent::Notify` before handing the result to `store::parse_hints`;
+/// remove this (and the same allow on every private helper below it) once
+/// that wiring lands.
+#[allow(dead_code)]
+pub fn hints_to_plain(hints: &HashMap<String, OwnedValue>) -> HashMap<String, store::HintValue> {
+    hints
+        .iter()
+        .filter_map(|(key, value)| hint_value_from_owned(value).map(|hv| (key.clone(), hv)))
+        .collect()
+}
+
+/// Converts one `OwnedValue` into a [`store::HintValue`], or `None` if its
+/// wire type isn't one of the four this crate's hint parsing needs: `y`
+/// (urgency's byte), `b` (transient/resident), `s` (the image-path
+/// aliases), and the `(iiibiiay)` structure (the image-data aliases).
+///
+/// `OwnedValue: Deref<Target = zvariant::Value<'static>>`, so `&*value`
+/// borrows the underlying `Value` for matching without cloning it — cloning
+/// a `Value` is fallible in general (`Fd` variants can fail to `dup`, per
+/// `zvariant`'s own `try_clone`), so this reads through the reference
+/// instead of ever calling `.clone()` on an arbitrary hint value.
+fn hint_value_from_owned(value: &OwnedValue) -> Option<store::HintValue> {
+    match &**value {
+        Value::U8(byte) => Some(store::HintValue::Byte(*byte)),
+        Value::Bool(b) => Some(store::HintValue::Bool(*b)),
+        Value::Str(s) => Some(store::HintValue::Str(s.as_str().to_string())),
+        Value::Structure(structure) => image_data_from_structure(structure),
+        _ => None,
+    }
+}
+
+/// Unpacks the freedesktop `(iiibiiay)` image-data structure
+/// (`image-data`/`image_data`/`icon_data`'s wire type) into
+/// [`store::HintValue::ImageData`]. Any field with the wrong arity or wire
+/// type — a malformed or spec-violating sender — returns `None` rather than
+/// panicking on a missing/mismatched field; `store.rs`'s own
+/// `decode_image_data` is what validates the *values* (dimensions,
+/// rowstride, channel count) once they're plain Rust types.
+fn image_data_from_structure(structure: &Structure<'_>) -> Option<store::HintValue> {
+    let fields = structure.fields();
+    let [
+        width,
+        height,
+        rowstride,
+        has_alpha,
+        bits_per_sample,
+        channels,
+        data,
+    ] = fields
+    else {
+        return None;
+    };
+
+    Some(store::HintValue::ImageData {
+        width: i32_field(width)?,
+        height: i32_field(height)?,
+        rowstride: i32_field(rowstride)?,
+        has_alpha: bool_field(has_alpha)?,
+        bits_per_sample: i32_field(bits_per_sample)?,
+        channels: i32_field(channels)?,
+        data: byte_array_field(data)?,
+    })
+}
+
+fn i32_field(value: &Value<'_>) -> Option<i32> {
+    match value {
+        Value::I32(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn bool_field(value: &Value<'_>) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+fn byte_array_field(value: &Value<'_>) -> Option<Vec<u8>> {
+    match value {
+        Value::Array(array) => array
+            .iter()
+            .map(|element| match element {
+                Value::U8(b) => Some(*b),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+// ============================================================================
 // serve / run — name claims and the long-lived worker.
 // ============================================================================
 
@@ -670,6 +787,84 @@ mod tests {
         assert_eq!(ids.allocate(), u32::MAX);
         assert_eq!(ids.allocate(), 1);
         assert_eq!(ids.allocate(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // hint_value_from_owned / hints_to_plain — the zvariant <-> store.rs
+    // HintValue bridge.
+    // ------------------------------------------------------------------
+
+    fn owned(value: Value<'_>) -> OwnedValue {
+        OwnedValue::try_from(value).expect("simple scalar/structure values always convert")
+    }
+
+    #[test]
+    fn byte_value_converts_to_hint_byte() {
+        assert_eq!(
+            hint_value_from_owned(&owned(Value::U8(2))),
+            Some(store::HintValue::Byte(2))
+        );
+    }
+
+    #[test]
+    fn bool_value_converts_to_hint_bool() {
+        assert_eq!(
+            hint_value_from_owned(&owned(Value::Bool(true))),
+            Some(store::HintValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn str_value_converts_to_hint_str() {
+        assert_eq!(
+            hint_value_from_owned(&owned(Value::Str("/tmp/icon.png".into()))),
+            Some(store::HintValue::Str("/tmp/icon.png".to_string()))
+        );
+    }
+
+    #[test]
+    fn structure_value_converts_to_hint_image_data() {
+        let structure = Structure::from((1i32, 1i32, 3i32, false, 8i32, 3i32, vec![1u8, 2, 3]));
+        let converted = hint_value_from_owned(&owned(Value::Structure(structure)));
+        assert_eq!(
+            converted,
+            Some(store::HintValue::ImageData {
+                width: 1,
+                height: 1,
+                rowstride: 3,
+                has_alpha: false,
+                bits_per_sample: 8,
+                channels: 3,
+                data: vec![1, 2, 3],
+            })
+        );
+    }
+
+    #[test]
+    fn structure_with_wrong_arity_does_not_convert() {
+        let structure = Structure::from((1i32, 2i32));
+        assert_eq!(
+            hint_value_from_owned(&owned(Value::Structure(structure))),
+            None
+        );
+    }
+
+    #[test]
+    fn unsupported_value_type_does_not_convert() {
+        // sender-pid's real wire type — this crate has no HintValue variant
+        // for it, and never will need one.
+        assert_eq!(hint_value_from_owned(&owned(Value::I64(4242))), None);
+    }
+
+    #[test]
+    fn hints_to_plain_drops_unconvertible_entries_and_keeps_the_rest() {
+        let mut hints = HashMap::new();
+        hints.insert("urgency".to_string(), owned(Value::U8(2)));
+        hints.insert("sender-pid".to_string(), owned(Value::I64(4242)));
+
+        let plain = hints_to_plain(&hints);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain.get("urgency"), Some(&store::HintValue::Byte(2)));
     }
 
     #[test]

@@ -13,7 +13,7 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: Stage 3 done — `notifications.toml` loads at boot
+> Status: Stage 4 done — `notifications.toml` loads at boot
 > (`src/config.rs`, hand-walked `toml::Table`, never `serde::Deserialize`)
 > and live-reloads over inotify (`src/config_watch.rs`, wired but inert
 > until Stage 5's daemon calls it from its own `subscription()`). The D-Bus
@@ -21,11 +21,17 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 > `NotificationsService` (`org.freedesktop.Notifications`) and
 > `ControlService` (`io.saola.Notifications1`), each forwarding a
 > `DaemonEvent` over an `iced::futures::channel::mpsc` channel that
-> `main.rs`'s plain `#[tokio::main]` runner drains and logs — no store, no
-> UI surface exists yet (Stages 4/5). PLAN.md is the staged build plan and
-> its **Context**, **Architecture**, and **Frozen external contracts**
-> sections are binding; read them before any implementation work. This
-> file summarizes the rules that must hold in every stage.
+> `main.rs`'s plain `#[tokio::main]` runner drains and logs. `src/store.rs`
+> is now the pure notification model behind that bridge — hint parsing
+> (urgency, transient, resident, the six-alias image lookup and `iiibiiay`
+> decode), Pango/HTML body-markup stripping, DND policy, expiry policy (a
+> pausable stopwatch), and the in-memory toast-stack/history `Store` with
+> its replace-vs-same-app rules — but nothing calls into it yet (wired
+> `#[allow(dead_code)]`, same as `config_watch.rs`). No UI surface exists
+> yet (Stage 5). PLAN.md is the staged build plan and its **Context**,
+> **Architecture**, and **Frozen external contracts** sections are binding;
+> read them before any implementation work. This file summarizes the rules
+> that must hold in every stage.
 
 ## Commands
 
