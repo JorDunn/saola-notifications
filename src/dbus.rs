@@ -14,7 +14,7 @@
 //! because a `process::exit` from inside a stream tears the process down
 //! mid-frame instead of letting iced's own event loop shut down cleanly.
 //! [`serve`] is this module's only entry point; [`emit_notification_closed`]
-//! is its only exit.
+//! and [`emit_action_invoked`] (Stage 6) are its only exits.
 //!
 //! # Serving vs. proxying (teaching note, same split as
 //! `saola-capture::dbus` and `saola-session::modules::inhibit`)
@@ -386,9 +386,10 @@ impl NotificationsService {
         reason: u32,
     ) -> zbus::Result<()>;
 
-    /// Part of the frozen contract from this stage on; nothing emits it
-    /// yet — Stage 6 ("Actions") is what invokes an action pill and fires
-    /// this.
+    /// Emitted from `main.rs`'s `update` via [`emit_action_invoked`] — the
+    /// same "no `SignalEmitter` on hand outside a served method" shape
+    /// [`notification_closed`] uses for reasons `1`/`2`, applied to Stage
+    /// 6's action pills (and a card's own `"default"` action).
     #[zbus(signal)]
     async fn action_invoked(
         emitter: &SignalEmitter<'_>,
@@ -726,6 +727,21 @@ pub async fn emit_notification_closed(
 ) -> zbus::Result<()> {
     let emitter = SignalEmitter::new(connection, NOTIFICATIONS_OBJECT_PATH)?;
     NotificationsService::notification_closed(&emitter, id, reason).await
+}
+
+/// Emits `ActionInvoked(id, action_key)` on `org.freedesktop.Notifications`
+/// from *outside* a served method — the Stage 6 sibling of
+/// [`emit_notification_closed`], same reasoning: an action pill (or a
+/// card's own `"default"` action) is invoked from `main.rs`'s `update`, not
+/// from a bus call, so there is no `SignalEmitter` already in hand the way
+/// a served method gets one for free.
+pub async fn emit_action_invoked(
+    connection: &Connection,
+    id: u32,
+    action_key: &str,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection, NOTIFICATIONS_OBJECT_PATH)?;
+    NotificationsService::action_invoked(&emitter, id, action_key).await
 }
 
 #[cfg(test)]

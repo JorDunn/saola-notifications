@@ -176,6 +176,57 @@ impl CloseReason {
 }
 
 // ============================================================================
+// Actions (Stage 6 — "Actions")
+// ============================================================================
+
+/// The notification's `"default"` action, if it declared one.
+///
+/// Style guide §6 / PLAN.md Stage 6: `"default"` is the one action key that
+/// never renders as a pill — it is what a card click fires instead of the
+/// plain dismiss every other card gets. `main.rs`/`modules/toast.rs` call
+/// this on every card click to decide which of the two a given card gets;
+/// [`action_pills`] is the complementary "everything that *does* render" cut.
+pub fn default_action(notification: &Notification) -> Option<&Action> {
+    notification
+        .actions
+        .iter()
+        .find(|action| action.key == "default")
+}
+
+/// The notification's action pills: every action except `"default"` (see
+/// [`default_action`]). Order matches `Notify`'s own `actions` array, which
+/// `main.rs`'s `unpack_actions` already preserves.
+pub fn action_pills(notification: &Notification) -> impl Iterator<Item = &Action> {
+    notification
+        .actions
+        .iter()
+        .filter(|action| action.key != "default")
+}
+
+/// What invoking one action — a pill, or the card's own `"default"` action
+/// firing on click — does to the toast that carried it.
+///
+/// PLAN.md Stage 6: "Invoking an action emits `ActionInvoked(id, key)` then
+/// closes the toast (reason 2) unless the notification is `resident`."
+/// `ActionInvoked` itself is unconditional (the caller always emits it;
+/// this file never touches D-Bus) — this function decides only the "then
+/// closes" half, so the toast module and `main.rs` share one answer instead
+/// of each re-deriving it from `resident`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionInvocation {
+    /// Whether the caller should also dismiss the toast
+    /// (`store::dismiss_toast` + `NotificationClosed(id, 2)`) after
+    /// `ActionInvoked` fires.
+    pub close_after: bool,
+}
+
+pub fn invoke_action_policy(resident: bool) -> ActionInvocation {
+    ActionInvocation {
+        close_after: !resident,
+    }
+}
+
+// ============================================================================
 // Hint parsing
 // ============================================================================
 
@@ -1565,6 +1616,87 @@ mod tests {
     #[test]
     fn manual_dnd_without_bypass_still_suppresses_critical() {
         assert!(should_suppress_toast(Urgency::Critical, true, false, false));
+    }
+
+    // ------------------------------------------------------------------
+    // Actions (Stage 6)
+    // ------------------------------------------------------------------
+
+    fn action(key: &str, label: &str) -> Action {
+        Action {
+            key: key.to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn default_action_is_none_when_there_are_no_actions() {
+        let n = notification(1, "app", Instant::now());
+        assert_eq!(default_action(&n), None);
+    }
+
+    #[test]
+    fn default_action_is_none_when_only_non_default_actions_are_present() {
+        let n = Notification {
+            actions: vec![action("yes", "Yes"), action("no", "No")],
+            ..notification(1, "app", Instant::now())
+        };
+        assert_eq!(default_action(&n), None);
+    }
+
+    #[test]
+    fn default_action_finds_the_default_key_among_others() {
+        let n = Notification {
+            actions: vec![action("yes", "Yes"), action("default", "Open")],
+            ..notification(1, "app", Instant::now())
+        };
+        assert_eq!(default_action(&n), Some(&action("default", "Open")));
+    }
+
+    #[test]
+    fn action_pills_is_empty_when_there_are_no_actions() {
+        let n = notification(1, "app", Instant::now());
+        assert_eq!(action_pills(&n).count(), 0);
+    }
+
+    #[test]
+    fn action_pills_excludes_only_the_default_key() {
+        let n = Notification {
+            actions: vec![
+                action("default", "Open"),
+                action("yes", "Yes"),
+                action("no", "No"),
+            ],
+            ..notification(1, "app", Instant::now())
+        };
+        let pills: Vec<&Action> = action_pills(&n).collect();
+        assert_eq!(pills, vec![&action("yes", "Yes"), &action("no", "No")]);
+    }
+
+    #[test]
+    fn action_pills_preserves_notify_s_own_order() {
+        let n = Notification {
+            actions: vec![action("no", "No"), action("yes", "Yes")],
+            ..notification(1, "app", Instant::now())
+        };
+        let pills: Vec<&Action> = action_pills(&n).collect();
+        assert_eq!(pills, vec![&action("no", "No"), &action("yes", "Yes")]);
+    }
+
+    #[test]
+    fn invoke_action_policy_closes_a_non_resident_toast() {
+        assert_eq!(
+            invoke_action_policy(false),
+            ActionInvocation { close_after: true }
+        );
+    }
+
+    #[test]
+    fn invoke_action_policy_leaves_a_resident_toast_open() {
+        assert_eq!(
+            invoke_action_policy(true),
+            ActionInvocation { close_after: false }
+        );
     }
 
     // ------------------------------------------------------------------

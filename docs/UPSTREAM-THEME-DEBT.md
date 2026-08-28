@@ -22,6 +22,7 @@ Pinned tag at the time of writing: `saola-theme-v0.13.0`.
 | 2026-08-28 | **No screen-edge inset token.** §6 anchors popovers, the notification centre and the toast stack "26px from the relevant edge"; `sizes.popover_top` carries the 72 px vertical half, but the horizontal 26 px only exists as `sizes.panel_margin_islands` — the right number under a name that is about the panel's islands. Wanted: a `sizes.shell_edge_gap` (or `popover_right`) the two can share. | `main.rs::toast_surface_settings` uses `sizes.panel_margin_islands` (26.0) for the toast surface's right margin, with a comment saying why. | No |
 | 2026-08-28 | **No redraw-cadence token.** Every `motion.*` value is a *design* duration; an animated surface also needs a frame interval to repaint on, and each consumer is inventing its own (saola-capture's toast: 32 ms; its flash: 16 ms). Wanted: `motion.frame` (or similar) so animated Saola surfaces share one cadence. | `modules/toast.rs::REDRAW_INTERVAL` is 32 ms, saola-capture's own interim toast cadence carried over unchanged. | No |
 | 2026-08-28 | **No easing helper.** §5 specifies the toast entrance as `ease-out`; `motion::fraction` is linear and `motion::toast_alpha` is built on it, so the theme's own §5 encoding is linear too. Wanted: either an easing function beside `fraction`, or a §5 correction saying the entrance is linear. | `modules/toast.rs::slide_offset` travels linearly, matching what `motion::toast_alpha` already does for the fade it plays alongside. Called out rather than fixed locally, because inventing a curve here would put the toast's motion out of step with every other Saola surface. | No |
+| 2026-08-28 | **No alpha-aware action-pill style.** Style guide §6's "optional ivory action pills" match `style::button::rest`/`emphasis` at `(Surface::Ink, Chrome::Shell)` exactly (a solid ivory pill, ink label — `widget::pill_button` already builds this pill's whole geometry), but neither the style helpers nor `widget::pill_button` take an `alpha` — the same gap Stage 5 already logged against `notification::{life_rule, icon_tile}`, now on a third widget family. A toast's pills can't fade in step with the rest of the card (iced 0.14 has no subtree opacity) without one. Wanted: an `alpha` parameter on `style::button::rest`/`emphasis` (mirroring `container::notification_card`'s), or a faded `widget::pill_button` variant. | `modules/toast.rs::action_pill`/`action_pill_style` reproduce `widget::pill_button`'s exact recipe (`sizes.hit_target_bar` height, `paddings.pill_button` padding, `ui_font` at `typography.size.body`, `widget::centered`) by hand, wrapping `style::button::rest(t, Surface::Ink, Chrome::Shell)` and scaling the returned `Style`'s background/text-color alpha afterward — the same pattern Stage 5's `tile_style`/`life_rule_style` already established for this exact class of gap. | No — see "Notification status" below |
 
 ## Notification status
 
@@ -37,6 +38,14 @@ upstream is an open item — carried in the Stage 5 handoff so that whoever
 next has a `saola-theme` session open (or Jordan directly) can send them in
 one message rather than six. The message text is ready to paste; it is in
 `.claude/handoffs/handoff_stage_5.attempt_1.md`.
+
+**Stage 6 (2026-08-28)** added the seventh row above (the alpha-aware
+action-pill style) under the same constraint: no `saola-theme` session was
+reachable from this stage either (the task briefing states this directly —
+no `SendMessage`/`ListAgents` attempt was available to retry). The new
+entry is folded into the same "not yet sent" backlog rather than opening a
+second one; whoever next has a `saola-theme` session open can send all
+seven gaps in one message.
 
 None of these gaps are blocking: each has a token-only local workaround
 already in place, and the two envelope functions are pinned to the theme's

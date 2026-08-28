@@ -73,11 +73,14 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{Space, column, container, image, mouse_area, progress_bar, row, text};
+use iced::widget::{Space, button, column, container, image, mouse_area, progress_bar, row, text};
 use iced::{Center, Element, Length, Subscription};
-use saola_theme::{ColorExt, Theme};
+use saola_theme::{Chrome, ColorExt, Surface, Theme};
 
-use crate::store::{ExpiryPolicy, Notification, Store, ToastEntry, Urgency, expiry_policy};
+use crate::store::{
+    ExpiryPolicy, Notification, Store, ToastEntry, Urgency, action_pills, default_action,
+    expiry_policy, invoke_action_policy,
+};
 
 /// How many lines of body text a card reserves room for.
 ///
@@ -199,19 +202,24 @@ pub fn slide_offset(theme: &Theme, elapsed: Duration) -> f32 {
 /// and the surface arithmetic never has to ask about urgency; the urgent
 /// card simply leaves that strip empty.
 pub fn card_height(theme: &Theme, notification: &Notification) -> f32 {
-    // Stage 6 ("Actions") adds an action-pill row to the card and will read
-    // `notification.actions` here to size it. Nothing about the Stage 5 card
-    // varies per notification, so the parameter is taken now — the signature
-    // is what `main.rs` and (Stage 7) the centre call — rather than added
-    // later and rippled through every call site.
-    let _ = notification;
-
     let title = theme.typography.size.body * theme.typography.line_height;
     let body = theme.typography.size.secondary * theme.typography.line_height;
     let text_block = title + theme.sizes.gap_tight + body * BODY_LINES;
     let content = text_block.max(theme.sizes.icon_tile);
 
-    theme.sizes.popover_padding * 2.0 + content + theme.sizes.life_rule
+    // Stage 6 ("Actions"): one extra row, `sizes.hit_target_bar` tall (the
+    // same fixed height `action_pill` below declares its buttons at), a
+    // `sizes.gap_tight` below the icon/text row — only when this
+    // notification actually has a pill to show (the `"default"` action
+    // never renders one; see `store::action_pills`). Zero-height when there
+    // are none, so a card with no actions is exactly the Stage 5 height.
+    let pills_height = if action_pills(notification).next().is_some() {
+        theme.sizes.gap_tight + theme.sizes.hit_target_bar
+    } else {
+        0.0
+    };
+
+    theme.sizes.popover_padding * 2.0 + content + pills_height + theme.sizes.life_rule
 }
 
 /// The toast surface's declared height for the whole stack: every card's
@@ -253,7 +261,13 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(32);
 
 /// The toast stack's own message type, nested into `main.rs`'s outer
 /// `Message` as `Message::Toast(..)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No longer `Copy` as of Stage 6: [`Message::ActionClicked`] carries an
+/// owned action key, cloned out of the notification's own `actions` list at
+/// `card_view` build time (an `Element<'a, Message>`'s `on_press` value has
+/// to be `'static`-free of `notification`'s own borrow, so it can't hold a
+/// `&'a str`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// One [`REDRAW_INTERVAL`] elapsed. Carries no timestamp: `main.rs`
     /// passes the `now` it read alongside the message, the same
@@ -267,8 +281,18 @@ pub enum Message {
     Hovered(u32),
     /// The pointer left a card. Resumes that card's clock.
     Unhovered(u32),
-    /// A card was clicked.
+    /// A card was clicked outside any action pill. Dismisses the card
+    /// (reason 2) unless the notification declared a `"default"` action, in
+    /// which case this behaves exactly like [`Message::ActionClicked`] with
+    /// that action's key (style guide §6 / PLAN.md Stage 6: "the `default`
+    /// action key renders no pill; it fires on card click").
     Clicked(u32),
+    /// One action pill was clicked — carries the notification id and the
+    /// action's own key (never `"default"`; that key has no pill — see
+    /// [`Message::Clicked`]). Emits `ActionInvoked(id, key)` and then
+    /// dismisses the toast (reason 2) unless the notification is
+    /// `resident` (`store::invoke_action_policy`).
+    ActionClicked(u32, String),
 }
 
 /// What a [`Message`] asks `main.rs` to do beyond the store mutation
@@ -284,6 +308,18 @@ pub enum Action {
     Closed {
         ids: Vec<u32>,
         reason: crate::store::CloseReason,
+    },
+    /// Stage 6: an action was invoked — either a pill
+    /// ([`Message::ActionClicked`]), or the card's own `"default"` action
+    /// firing on click. `main.rs` always emits `ActionInvoked(id, key)`;
+    /// `closed` is [`crate::store::invoke_action_policy`]'s answer, already
+    /// applied to the store by the time this is returned (the toast is
+    /// already gone from `Store::toasts()` if `closed` is `true`) — `closed`
+    /// tells `main.rs` whether to *also* emit `NotificationClosed(id, 2)`.
+    Invoked {
+        id: u32,
+        key: String,
+        closed: bool,
     },
 }
 
@@ -345,24 +381,68 @@ impl Toasts {
                 store.resume_toast(id, now);
                 Action::None
             }
-            // Stage 6 ("Actions") splits this arm: a notification carrying a
-            // `"default"` action fires it here instead, and only a card
-            // without one dismisses on click. Until then every click is a
-            // dismissal, which is what the freedesktop spec calls
-            // `NotificationClosed` reason 2.
+            // A notification carrying a `"default"` action fires it instead
+            // of dismissing — style guide §6 / PLAN.md Stage 6: "the
+            // `default` action key renders no pill; it fires on card
+            // click." A card with no `"default"` action dismisses exactly
+            // as it always has.
             Message::Clicked(id) => {
-                if self.hovered == Some(id) {
-                    self.hovered = None;
-                }
-                if store.dismiss_toast(id) {
-                    Action::Closed {
-                        ids: vec![id],
-                        reason: crate::store::CloseReason::UserDismissed,
+                let Some(entry) = store.toasts().iter().find(|t| t.notification.id == id) else {
+                    return Action::None;
+                };
+                match default_action(&entry.notification) {
+                    Some(action) => {
+                        let key = action.key.clone();
+                        self.invoke(store, id, key)
                     }
-                } else {
-                    Action::None
+                    None => {
+                        if self.hovered == Some(id) {
+                            self.hovered = None;
+                        }
+                        if store.dismiss_toast(id) {
+                            Action::Closed {
+                                ids: vec![id],
+                                reason: crate::store::CloseReason::UserDismissed,
+                            }
+                        } else {
+                            Action::None
+                        }
+                    }
                 }
             }
+
+            Message::ActionClicked(id, key) => self.invoke(store, id, key),
+        }
+    }
+
+    /// The shared body of an action firing, whether that's a pill
+    /// ([`Message::ActionClicked`]) or a `"default"` action triggered by
+    /// [`Message::Clicked`]: apply [`crate::store::invoke_action_policy`] to
+    /// this notification's `resident` flag, dismiss the toast if the policy
+    /// says to, and report both back to `main.rs` as one
+    /// [`Action::Invoked`].
+    ///
+    /// A pill click cannot land here for an `id` the store no longer has —
+    /// the pill only exists inside that notification's own `card_view` — but
+    /// a defensive `None` is still cheaper than an `unwrap`, per AGENTS.md's
+    /// no-panics rule.
+    fn invoke(&mut self, store: &mut Store, id: u32, key: String) -> Action {
+        let Some(entry) = store.toasts().iter().find(|t| t.notification.id == id) else {
+            return Action::None;
+        };
+        let policy = invoke_action_policy(entry.notification.resident);
+
+        if self.hovered == Some(id) {
+            self.hovered = None;
+        }
+        if policy.close_after {
+            store.dismiss_toast(id);
+        }
+
+        Action::Invoked {
+            id,
+            key,
+            closed: policy.close_after,
         }
     }
 
@@ -484,10 +564,19 @@ pub fn card_view<'a>(
         .height(Length::Fixed(text_block_height))
         .clip(true);
 
-    let content = row![icon_tile(theme, notification, alpha), text_block]
+    let icon_and_text = row![icon_tile(theme, notification, alpha), text_block]
         .spacing(theme.sizes.pill_gap)
-        .padding(theme.sizes.popover_padding)
         .align_y(Center);
+
+    // Stage 6: action pills sit below the body, inside the same padding as
+    // the icon/text row above them — `pills_row` returns `None` when this
+    // notification has no non-`"default"` action (`store::action_pills`),
+    // so a card with none is laid out exactly as it was in Stage 5.
+    let mut inner = column![icon_and_text].spacing(theme.sizes.gap_tight);
+    if let Some(pills) = pills_row(theme, notification, alpha) {
+        inner = inner.push(pills);
+    }
+    let content = container(inner).padding(theme.sizes.popover_padding);
 
     let card = container(column![content, life_rule(theme, life, alpha)])
         .width(Length::Fixed(theme.sizes.notification_card_width))
@@ -589,6 +678,85 @@ fn life_rule_style(
         background: iced::Background::Color(track),
         bar: iced::Background::Color(accent),
         border: saola_theme::style::border_none(0.0),
+    }
+}
+
+/// Style guide §6's "optional ivory action pills," one per non-`"default"`
+/// action ([`action_pills`]) in `Notify`'s own order. `None` when this
+/// notification has none, so [`card_view`] can skip the row entirely — its
+/// height budget ([`card_height`]) agrees, so a card with no actions never
+/// reserves space for a row it doesn't draw.
+fn pills_row<'a>(
+    theme: &Theme,
+    notification: &'a Notification,
+    alpha: f32,
+) -> Option<Element<'a, Message>> {
+    let mut pills = action_pills(notification).peekable();
+    pills.peek()?;
+
+    let mut r = row![].spacing(theme.sizes.pill_gap);
+    for action in pills {
+        r = r.push(action_pill(
+            theme,
+            alpha,
+            &action.label,
+            notification.id,
+            &action.key,
+        ));
+    }
+    Some(r.into())
+}
+
+/// One action pill — [`saola_theme::widget::pill_button`]'s exact geometry
+/// (`sizes.hit_target_bar` height, `paddings.pill_button`'s horizontal
+/// padding, [`saola_theme::convert::ui_font`] at `typography.size.body`,
+/// content vertically centered via [`saola_theme::widget::centered`]) built
+/// by hand rather than called directly, because that helper's style takes
+/// no `alpha` — see [`action_pill_style`].
+fn action_pill<'a>(
+    theme: &Theme,
+    alpha: f32,
+    label: &'a str,
+    id: u32,
+    key: &str,
+) -> Element<'a, Message> {
+    let content = saola_theme::widget::centered(
+        text(label)
+            .font(saola_theme::convert::ui_font(theme))
+            .size(theme.typography.size.body),
+    );
+    button(content)
+        .height(Length::Fixed(theme.sizes.hit_target_bar))
+        .padding([0.0, theme.paddings.pill_button[1]])
+        .style(action_pill_style(theme, alpha))
+        .on_press(Message::ActionClicked(id, key.to_string()))
+        .into()
+}
+
+/// [`saola_theme::style::button::rest`] at `(Surface::Ink, Chrome::Shell)` —
+/// the solid-ivory-pill/ink-label recipe style guide §6's "Secondary" pill
+/// variant and its own "ivory action pills" both describe — with the card's
+/// own fade applied on top, the same way [`tile_style`]/[`life_rule_style`]
+/// carry `alpha` for a theme helper that doesn't take one.
+///
+/// **Theme gap** (`docs/UPSTREAM-THEME-DEBT.md`): `style::button::rest` /
+/// `emphasis` / `widget::pill_button` have no `alpha` parameter, so a pill
+/// can't fade in step with the rest of a toast card (iced 0.14 has no
+/// subtree opacity — see this module's doc comment). Every color below is
+/// still a token, scaled after the fact rather than invented.
+fn action_pill_style(
+    theme: &Theme,
+    alpha: f32,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style + Clone + use<> {
+    let base = saola_theme::style::button::rest(theme, Surface::Ink, Chrome::Shell);
+    let alpha = alpha.clamp(0.0, 1.0);
+    move |t, status| {
+        let mut style = base(t, status);
+        if let Some(iced::Background::Color(ref mut color)) = style.background {
+            color.a *= alpha;
+        }
+        style.text_color.a *= alpha;
+        style
     }
 }
 
@@ -852,5 +1020,231 @@ mod tests {
         let step = (card + t.sizes.island_gap).round() as u32;
         assert_eq!(two - one, step);
         assert_eq!(three - two, step);
+    }
+
+    #[test]
+    fn a_card_with_action_pills_is_taller_than_one_without() {
+        let t = theme();
+        let plain = notification(1, Urgency::Normal, -1);
+        let with_pills = Notification {
+            actions: vec![action("yes", "Yes"), action("no", "No")],
+            ..notification(2, Urgency::Normal, -1)
+        };
+        assert!(
+            card_height(&t, &with_pills) > card_height(&t, &plain),
+            "the pill row must widen the card's declared height, or the surface clips it"
+        );
+    }
+
+    #[test]
+    fn a_card_whose_only_action_is_default_is_the_same_height_as_one_with_none() {
+        // "default" never renders a pill, so it must not reserve the pill
+        // row's height either.
+        let t = theme();
+        let plain = notification(1, Urgency::Normal, -1);
+        let default_only = Notification {
+            actions: vec![action("default", "Open")],
+            ..notification(2, Urgency::Normal, -1)
+        };
+        assert_eq!(card_height(&t, &plain), card_height(&t, &default_only));
+    }
+
+    // -- action policy (Stage 6) ---------------------------------------------
+
+    fn action(key: &str, label: &str) -> crate::store::Action {
+        crate::store::Action {
+            key: key.to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    fn limits() -> crate::store::Limits {
+        crate::store::Limits {
+            icon_tile: 36.0,
+            toast_idle_ms: 5000,
+            toast_envelope_ms: 0,
+            toast_max_stack: 3,
+            history_cap: 100,
+        }
+    }
+
+    /// A `Store` with exactly one toast on screen: `notification`, pushed
+    /// as a brand-new, unsuppressed `Notify` call.
+    fn store_with(notification: Notification) -> Store {
+        let mut store = Store::new();
+        store.notify(notification, 0, false, Instant::now(), &limits());
+        store
+    }
+
+    #[test]
+    fn clicking_a_card_with_no_default_action_dismisses_it() {
+        let mut toasts = Toasts::default();
+        let mut store = store_with(notification(1, Urgency::Normal, -1));
+
+        let result = toasts.update(Message::Clicked(1), &mut store, &limits(), Instant::now());
+
+        assert_eq!(
+            result,
+            Action::Closed {
+                ids: vec![1],
+                reason: crate::store::CloseReason::UserDismissed,
+            }
+        );
+        assert!(
+            store.toasts().is_empty(),
+            "the card must actually leave the stack, not just report that it should"
+        );
+    }
+
+    #[test]
+    fn clicking_a_card_with_a_default_action_invokes_it_instead_of_dismissing() {
+        let n = Notification {
+            actions: vec![action("default", "Open")],
+            ..notification(1, Urgency::Normal, -1)
+        };
+        let mut toasts = Toasts::default();
+        let mut store = store_with(n);
+
+        let result = toasts.update(Message::Clicked(1), &mut store, &limits(), Instant::now());
+
+        assert_eq!(
+            result,
+            Action::Invoked {
+                id: 1,
+                key: "default".to_string(),
+                closed: true,
+            }
+        );
+        assert!(
+            store.toasts().is_empty(),
+            "a non-resident notification's toast closes once its action fires"
+        );
+    }
+
+    #[test]
+    fn clicking_a_resident_card_s_default_action_invokes_it_without_closing() {
+        let n = Notification {
+            actions: vec![action("default", "Open")],
+            resident: true,
+            ..notification(1, Urgency::Normal, -1)
+        };
+        let mut toasts = Toasts::default();
+        let mut store = store_with(n);
+
+        let result = toasts.update(Message::Clicked(1), &mut store, &limits(), Instant::now());
+
+        assert_eq!(
+            result,
+            Action::Invoked {
+                id: 1,
+                key: "default".to_string(),
+                closed: false,
+            }
+        );
+        assert_eq!(
+            store.toasts().len(),
+            1,
+            "a resident notification's toast stays on screen after its action fires"
+        );
+    }
+
+    #[test]
+    fn clicking_an_action_pill_invokes_its_own_key_and_closes_a_non_resident_toast() {
+        let n = Notification {
+            actions: vec![action("yes", "Yes"), action("no", "No")],
+            ..notification(1, Urgency::Normal, -1)
+        };
+        let mut toasts = Toasts::default();
+        let mut store = store_with(n);
+
+        let result = toasts.update(
+            Message::ActionClicked(1, "no".to_string()),
+            &mut store,
+            &limits(),
+            Instant::now(),
+        );
+
+        assert_eq!(
+            result,
+            Action::Invoked {
+                id: 1,
+                key: "no".to_string(),
+                closed: true,
+            }
+        );
+        assert!(store.toasts().is_empty());
+    }
+
+    #[test]
+    fn clicking_an_action_pill_on_a_resident_toast_leaves_it_on_screen() {
+        let n = Notification {
+            actions: vec![action("yes", "Yes")],
+            resident: true,
+            ..notification(1, Urgency::Normal, -1)
+        };
+        let mut toasts = Toasts::default();
+        let mut store = store_with(n);
+
+        let result = toasts.update(
+            Message::ActionClicked(1, "yes".to_string()),
+            &mut store,
+            &limits(),
+            Instant::now(),
+        );
+
+        assert_eq!(
+            result,
+            Action::Invoked {
+                id: 1,
+                key: "yes".to_string(),
+                closed: false,
+            }
+        );
+        assert_eq!(store.toasts().len(), 1);
+    }
+
+    #[test]
+    fn action_clicked_for_a_toast_no_longer_on_screen_is_a_no_op() {
+        // Defensive: nothing in `card_view` can produce this (the pill only
+        // exists inside its own notification's card), but AGENTS.md's
+        // no-panics rule means a stale id must degrade quietly rather than
+        // `unwrap` on a lookup that came back empty.
+        let mut toasts = Toasts::default();
+        let mut store = Store::new();
+
+        let result = toasts.update(
+            Message::ActionClicked(1, "yes".to_string()),
+            &mut store,
+            &limits(),
+            Instant::now(),
+        );
+
+        assert_eq!(result, Action::None);
+    }
+
+    #[test]
+    fn invoking_an_action_clears_hover_state_for_that_card() {
+        let n = Notification {
+            actions: vec![action("yes", "Yes")],
+            ..notification(1, Urgency::Normal, -1)
+        };
+        let mut toasts = Toasts::default();
+        let mut store = store_with(n);
+        let now = Instant::now();
+
+        toasts.update(Message::Hovered(1), &mut store, &limits(), now);
+        assert_eq!(toasts.hovered(), Some(1));
+
+        toasts.update(
+            Message::ActionClicked(1, "yes".to_string()),
+            &mut store,
+            &limits(),
+            now,
+        );
+        assert_eq!(
+            toasts.hovered(),
+            None,
+            "the card the pointer was on just left the screen"
+        );
     }
 }

@@ -13,26 +13,27 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: **Stage 5 done — the daemon is visible.** `src/main.rs` is now an
-> `iced_layershell::build_pattern::daemon` that boots with ZERO surfaces
-> (`StartMode::Background`), bridges `src/dbus.rs` in through a
-> `Subscription::run` worker (`dbus_worker_stream`), stores the
-> `zbus::Connection` on `BusReady`, and emits `NotificationClosed` from
-> `update` via `Task::future` + `dbus::emit_notification_closed`.
-> `src/modules/toast.rs` renders style guide §6's notification card on a
-> `Toasts` layer-shell surface that is mapped on the first card, respawned
-> whenever the stack's declared height changes, and unmapped after the last
-> card leaves; §5's three-phase envelope (slide-in, rest, fade) is generalized
-> over each notification's own `expire_timeout`. `src/config.rs` +
-> `src/config_watch.rs` are live (the watcher is wired into the daemon's
-> `subscription()`), and `src/store.rs` is the model behind all of it.
-> Remaining: action pills (Stage 6), the notification centre (Stage 7), the
-> saola-capture bridge and auto-DND (Stage 8), and the real
-> `io.saola.Notifications1` properties (Stage 9 — they still answer with
-> placeholder values). PLAN.md is the staged build plan and its **Context**,
-> **Architecture**, and **Frozen external contracts** sections are binding;
-> read them before any implementation work. This file summarizes the rules
-> that must hold in every stage.
+> Status: **Stage 6 done — action pills.** `src/modules/toast.rs`'s
+> `card_view` renders style guide §6's "optional ivory action pills" below
+> the body for every action except `"default"` (`store::action_pills`);
+> `"default"` fires on card click instead of the plain dismiss
+> (`store::default_action`). Invoking an action — a pill click
+> (`Message::ActionClicked`) or a `"default"` click — always emits
+> `ActionInvoked(id, key)` (`dbus::emit_action_invoked`,
+> `Daemon::emit_action_invoked`) and additionally dismisses the toast
+> (`NotificationClosed`, reason 2) unless the notification is `resident`
+> — the policy is `store::invoke_action_policy`, a pure fn shared by
+> `Toasts::update` and `main.rs`. `card_height` reserves one extra row
+> (`gap_tight + hit_target_bar`) only when a notification actually has a
+> pill to show. Everything Stage 5 shipped (the daemon shape, the D-Bus
+> bridge, the toast envelope, config/config_watch, the store) is unchanged.
+> Remaining: the notification centre (Stage 7), the saola-capture bridge and
+> auto-DND (Stage 8), and the real `io.saola.Notifications1` properties
+> (Stage 9 — they still answer with placeholder values). PLAN.md is the
+> staged build plan and its **Context**, **Architecture**, and **Frozen
+> external contracts** sections are binding; read them before any
+> implementation work. This file summarizes the rules that must hold in
+> every stage.
 
 ## Commands
 

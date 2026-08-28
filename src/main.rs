@@ -352,6 +352,21 @@ impl Daemon {
                     modules::toast::Action::Closed { ids, reason } => {
                         self.emit_closed(&ids, reason)
                     }
+                    // Stage 6: `ActionInvoked` is unconditional; the store
+                    // has already decided (and, if `closed`, already
+                    // applied) whether the toast also comes off screen —
+                    // `Toasts::update`'s own `invoke` helper called
+                    // `store::invoke_action_policy` before returning this.
+                    modules::toast::Action::Invoked { id, key, closed } => {
+                        let invoked = self.emit_action_invoked(id, key);
+                        if closed {
+                            let dismissed =
+                                self.emit_closed(&[id], store::CloseReason::UserDismissed);
+                            Task::batch([invoked, dismissed])
+                        } else {
+                            invoked
+                        }
+                    }
                 };
                 Task::batch([emit, self.sync_toast_surface()])
             }
@@ -393,6 +408,12 @@ impl Daemon {
         );
         let replaces_id = request.replaces_id;
         let notification = request.into_notification(now);
+        // Captured before the move below — Stage 6 evidence (`busctl … Notify`
+        // with an `actions` array) reads this count off the log rather than
+        // off a pixel, since a pill can't be aimed at in the nested-niri
+        // environment this daemon's manual testing runs in (see the Stage 5
+        // handoff's "pixels" section).
+        let action_count = notification.actions.len();
         let effect = self
             .store
             .notify(notification, replaces_id, suppress, now, &self.limits);
@@ -400,6 +421,7 @@ impl Daemon {
         tracing::debug!(
             ?effect,
             suppress,
+            action_count,
             "saola-notifications: notification stored"
         );
 
@@ -584,6 +606,33 @@ impl Daemon {
                         "saola-notifications: could not emit NotificationClosed"
                     );
                 }
+            }
+        })
+        .discard()
+    }
+
+    /// Emit `ActionInvoked(id, key)`, off the update thread — Stage 6's
+    /// sibling of [`Self::emit_closed`]; see that method's doc comment for
+    /// why `Task::future(..).discard()` rather than an `.await`.
+    fn emit_action_invoked(&self, id: u32, key: String) -> Task<Message> {
+        let Some(connection) = self.connection.clone() else {
+            tracing::warn!(
+                id,
+                key,
+                "saola-notifications: no session-bus connection yet — ActionInvoked was not \
+                 emitted"
+            );
+            return Task::none();
+        };
+
+        Task::future(async move {
+            if let Err(err) = dbus::emit_action_invoked(&connection, id, &key).await {
+                tracing::warn!(
+                    id,
+                    key,
+                    error = %err,
+                    "saola-notifications: could not emit ActionInvoked"
+                );
             }
         })
         .discard()
