@@ -13,11 +13,14 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: pre-Stage-1 — the repo is a skeleton (README, LICENSE,
-> .gitignore). PLAN.md is the staged build plan and its **Context**,
-> **Architecture**, and **Frozen external contracts** sections are binding;
-> read them before any implementation work. This file summarizes the rules
-> that must hold in every stage.
+> Status: Stage 2 done — `notifications.toml` loads at boot
+> (`src/config.rs`, hand-walked `toml::Table`, never `serde::Deserialize`)
+> and live-reloads over inotify (`src/config_watch.rs`, wired but inert
+> until Stage 5's daemon calls it from its own `subscription()`). No D-Bus
+> service or UI surface exists yet. PLAN.md is the staged build plan and
+> its **Context**, **Architecture**, and **Frozen external contracts**
+> sections are binding; read them before any implementation work. This
+> file summarizes the rules that must hold in every stage.
 
 ## Commands
 

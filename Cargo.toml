@@ -114,6 +114,34 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # transitively, so this is a direct declaration of an already-resolved
 # crate, not new weight.
 futures = "0.3"
+# Survey — 2026-08-28 (Stage 2). Live-reload of `notifications.toml`: the
+# kernel's file-change signal, so a config edit reaches the running daemon
+# without a restart (see `src/config_watch.rs`). Same pick, same version
+# line, and same reasoning as `saola-panel`'s `Cargo.toml` (the only sibling
+# to have built this exact feature so far — `inotify = "0.11"`): the safe
+# binding over the raw inotify(7) syscalls, Linux-only, which this whole
+# desktop already is. Chosen over the cross-platform `notify` crate because
+# `notify` spawns and owns its own watcher thread, while inotify's `stream`
+# feature (a default feature; it adapts the inotify fd through tokio's
+# `AsyncFd`, using the `net` feature this crate's `tokio` runtime already
+# pulls in) yields a plain async `Stream` — exactly the shape an iced
+# subscription wants (`iced::stream::channel` in `config_watch.rs`), with no
+# extra thread to bridge. Default features only — `inotify`'s own manifest
+# declares its optional `tokio` dependency with `features = ["net"]`
+# already, so that requirement folds into the single `tokio` instance this
+# crate's dependency tree already resolves (via `iced`'s and `zbus`'s own
+# `tokio` features) rather than needing a direct `tokio` line here.
+inotify = "0.11"
+# Survey — 2026-08-28 (Stage 2). `config_watch.rs`'s debounce
+# (`tokio::time::sleep`) is the one direct use of `tokio` API surface this
+# crate's own code makes — `iced`'s and `zbus`'s `tokio` features only wire
+# *them* onto the shared runtime, they don't re-export `tokio::time`'s free
+# functions for this crate to call. `default-features = false` + `time`
+# only: no direct need for `net`/`io-util`/etc. here (`inotify`'s own
+# optional `tokio` dependency already requests `net` itself — see the
+# `inotify` entry above — and Cargo unifies both requests onto the one
+# resolved `tokio` instance the whole tree shares).
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 [profile.dev.package."*"]
 # Same rationale as `saola-capture`'s Cargo.toml (see its dated teaching

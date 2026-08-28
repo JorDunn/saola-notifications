@@ -11,8 +11,9 @@ notification centre.
 
 Pre-v0.1, skeleton stage. The staged build plan is [PLAN.md](PLAN.md); agent
 conventions are in [AGENTS.md](AGENTS.md). No daemon, D-Bus service, or UI
-surface exists yet — `cargo run` starts, logs a line, and exits. The UI
-follows the [Saola style guide](docs/SAOLA-STYLE-GUIDE.md).
+surface exists yet — `cargo run` resolves and loads `notifications.toml`,
+logs the result, and exits. The UI follows the
+[Saola style guide](docs/SAOLA-STYLE-GUIDE.md).
 
 ## Building
 
@@ -31,10 +32,12 @@ section for the full verify sequence CI runs.
 cargo run
 ```
 
-`cargo run` needs a Wayland session (a real niri session, or `niri` started
-inside a window for isolated testing — see AGENTS.md). There is no CLI
-surface yet; later stages add D-Bus service startup, then the toast and
-notification centre surfaces.
+Right now `cargo run` needs no Wayland session at all — it only resolves and
+loads `notifications.toml` and exits. Once the daemon lands (Stage 5) it
+will need a real niri session, or `niri` started inside a window for
+isolated testing (see AGENTS.md). There is no CLI surface yet; later
+stages add D-Bus service startup, then the toast and notification centre
+surfaces.
 
 ## Configuring
 
@@ -55,8 +58,10 @@ The file itself is `<that directory>/notifications.toml`.
 
 ### Schema
 
-Config parsing lands in Stage 2 — this is the planned shape, not yet read by
-the binary:
+Live-reload watches the resolved config directory: edit `notifications.toml`
+while the daemon runs and the change applies without a restart (once the
+daemon itself lands in Stage 5 — today `cargo run` only loads the file once,
+at startup).
 
 ```toml
 # Do not disturb by default at startup (toggle at runtime from the
