@@ -54,17 +54,12 @@
 //! [`subscription`] returns an `iced::Subscription` — a *description* of
 //! work, not work itself. It only starts running once handed to a live
 //! `iced_layershell::build_pattern::daemon`'s own `subscription()` method
-//! and driven by iced's runtime (see `saola-panel::main`'s wiring for the
-//! shape). This crate's `main.rs` doesn't boot that daemon until Stage 5,
-//! so nothing in this module runs yet — clippy's `dead_code` lint would
-//! otherwise fire on every item here, hence the module-level `allow`
-//! below. Stage 5 removes it once `main.rs` actually calls
-//! [`subscription`] from the app's own `subscription()` method.
-
-#![allow(
-    dead_code,
-    reason = "wired by Stage 5's iced_layershell daemon subscription() — see module doc comment"
-)]
+//! and driven by iced's runtime. **Stage 5 wired that up**:
+//! `main.rs::Daemon::subscription` calls [`subscription`] with the path
+//! `NotificationsConfig::resolve_path` resolved at boot, and maps the result
+//! into `Message::Config`. (Stages 2–4 carried a module-level
+//! `#![allow(dead_code)]` here because nothing booted a daemon yet; it is
+//! gone.)
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

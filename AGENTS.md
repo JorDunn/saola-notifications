@@ -13,22 +13,23 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: Stage 4 done — `notifications.toml` loads at boot
-> (`src/config.rs`, hand-walked `toml::Table`, never `serde::Deserialize`)
-> and live-reloads over inotify (`src/config_watch.rs`, wired but inert
-> until Stage 5's daemon calls it from its own `subscription()`). The D-Bus
-> bridge (`src/dbus.rs`) serves both frozen interfaces headlessly:
-> `NotificationsService` (`org.freedesktop.Notifications`) and
-> `ControlService` (`io.saola.Notifications1`), each forwarding a
-> `DaemonEvent` over an `iced::futures::channel::mpsc` channel that
-> `main.rs`'s plain `#[tokio::main]` runner drains and logs. `src/store.rs`
-> is now the pure notification model behind that bridge — hint parsing
-> (urgency, transient, resident, the six-alias image lookup and `iiibiiay`
-> decode), Pango/HTML body-markup stripping, DND policy, expiry policy (a
-> pausable stopwatch), and the in-memory toast-stack/history `Store` with
-> its replace-vs-same-app rules — but nothing calls into it yet (wired
-> `#[allow(dead_code)]`, same as `config_watch.rs`). No UI surface exists
-> yet (Stage 5). PLAN.md is the staged build plan and its **Context**,
+> Status: **Stage 5 done — the daemon is visible.** `src/main.rs` is now an
+> `iced_layershell::build_pattern::daemon` that boots with ZERO surfaces
+> (`StartMode::Background`), bridges `src/dbus.rs` in through a
+> `Subscription::run` worker (`dbus_worker_stream`), stores the
+> `zbus::Connection` on `BusReady`, and emits `NotificationClosed` from
+> `update` via `Task::future` + `dbus::emit_notification_closed`.
+> `src/modules/toast.rs` renders style guide §6's notification card on a
+> `Toasts` layer-shell surface that is mapped on the first card, respawned
+> whenever the stack's declared height changes, and unmapped after the last
+> card leaves; §5's three-phase envelope (slide-in, rest, fade) is generalized
+> over each notification's own `expire_timeout`. `src/config.rs` +
+> `src/config_watch.rs` are live (the watcher is wired into the daemon's
+> `subscription()`), and `src/store.rs` is the model behind all of it.
+> Remaining: action pills (Stage 6), the notification centre (Stage 7), the
+> saola-capture bridge and auto-DND (Stage 8), and the real
+> `io.saola.Notifications1` properties (Stage 9 — they still answer with
+> placeholder values). PLAN.md is the staged build plan and its **Context**,
 > **Architecture**, and **Frozen external contracts** sections are binding;
 > read them before any implementation work. This file summarizes the rules
 > that must hold in every stage.
@@ -40,12 +41,31 @@ cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings   # CI gate — warnings are errors
 cargo fmt --check                           # CI gate
-cargo run                                   # needs a D-Bus session bus; Wayland (niri) arrives Stage 5
+cargo run                                   # needs BOTH a Wayland session (niri) and a D-Bus session bus
 ```
 
 Live-testing anything that maps surfaces happens in a **nested niri**
 (`niri` in a window), never Jordan's real session, until the surface is
-proven to grab no keyboard.
+proven to grab no keyboard. The recipe Stage 5 settled on:
+
+```sh
+niri &                                   # nested; its socket appears in its own log
+export WAYLAND_DISPLAY=wayland-2         # whatever that log announced
+export NIRI_SOCKET=/run/user/1000/niri.wayland-2.<pid>.sock   # for `niri msg`
+dbus-run-session -- bash -c '…'          # mako owns org.freedesktop.Notifications on
+                                         # the real bus, so the daemon AND notify-send
+                                         # must share one disposable bus
+niri msg layers                          # the only introspection that lists layer surfaces
+grim shot.png                            # composited output of the nested compositor
+```
+
+**Known caveat (Stage 5, niri 26.04):** inside a nested (winit-backed) niri,
+an `iced_layershell` `StartMode::Background` daemon's on-demand surfaces are
+created, positioned and destroyed correctly — `niri msg layers` proves it —
+but never paint a visible frame. Reproduced identically with saola-capture's
+own known-good toast, so it is a property of the nested compositor, not of
+this crate. Verify surface **lifecycle** with `niri msg layers` there; visual
+confirmation needs a real niri session.
 
 ## Architecture (binding — PLAN.md's Architecture section is the source)
 

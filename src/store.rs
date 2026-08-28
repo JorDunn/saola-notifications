@@ -81,8 +81,25 @@ pub struct Limits {
     /// the *longer* side of every decoded image; see [`resolve_image`].
     pub icon_tile: f32,
     /// `saola_theme::tokens::Motion::toast_idle`, in milliseconds — the
-    /// theme-default toast lifetime an `expire_timeout` of `-1` resolves to.
+    /// theme-default **rest** span an `expire_timeout` of `-1` resolves to.
+    /// This is the phase where the card sits still and fully opaque; it is
+    /// not the card's whole life (see [`Limits::toast_envelope_ms`]).
     pub toast_idle_ms: u32,
+    /// `saola_theme::tokens::Motion::{toast_in + toast_out}`, in
+    /// milliseconds — the entrance and exit animations that *bracket* the
+    /// rest span.
+    ///
+    /// **Added in Stage 5**, and the reason is a correctness bug Stage 4
+    /// could not see from where it stood: [`expiry_policy`] resolves the
+    /// *rest* span (style guide §5's "5 s at rest"; PLAN.md's own words for
+    /// a positive `expire_timeout` are "replaces the idle span"), but a card
+    /// removed the instant its rest span ends never gets to play §5's
+    /// one-second fade-out — it would vanish rather than leave. So the card
+    /// is on screen for `toast_in + rest + toast_out`, and this field is the
+    /// `toast_in + toast_out` half of that sum. Zero means "no animation
+    /// bracket", which is what every expiry test written before Stage 5
+    /// assumes.
+    pub toast_envelope_ms: u32,
     /// `saola_theme::tokens::Motion::toast_max_stack` — at most this many
     /// toasts on screen at once; the next push evicts the oldest.
     pub toast_max_stack: usize,
@@ -642,6 +659,20 @@ pub fn has_expired(policy: ExpiryPolicy, elapsed: Duration) -> bool {
     }
 }
 
+/// Widens a *rest*-span policy into the toast's whole on-screen life by
+/// adding the entrance and exit animations that bracket it
+/// ([`Limits::toast_envelope_ms`]). [`ExpiryPolicy::Never`] widens to
+/// itself — a card that never leaves has no envelope to add.
+///
+/// Style guide §5's default case works out to exactly its stated total:
+/// `350 ms in + 5000 ms rest + 1000 ms out = 6.35 s`.
+pub fn visible_policy(policy: ExpiryPolicy, envelope: Duration) -> ExpiryPolicy {
+    match policy {
+        ExpiryPolicy::Never => ExpiryPolicy::Never,
+        ExpiryPolicy::After(rest) => ExpiryPolicy::After(rest.saturating_add(envelope)),
+    }
+}
+
 /// A pausable stopwatch: "frozen total from every previous running
 /// interval" (`elapsed_at_last_change`) plus "when the current interval
 /// started, if it's running" (`resumed_at`). Lifted from
@@ -752,6 +783,11 @@ pub enum NotifyEffect {
 pub struct Store {
     toasts: Vec<ToastEntry>,
     history: Vec<Notification>,
+    #[allow(
+        dead_code,
+        reason = "written by toggle_collapsed and read by is_collapsed, both of which the \
+                  notification centre (Stage 7) is the first caller of"
+    )]
     collapsed: HashSet<String>,
 }
 
@@ -768,16 +804,29 @@ impl Store {
     /// arrived in) — Stage 7's centre view groups this by `app_name` **at
     /// view time** (PLAN.md Stage 4: "grouped by app_name at view time"),
     /// not here; this store deliberately stays flat.
+    #[allow(
+        dead_code,
+        reason = "the notification centre (Stage 7) is history's only reader; the toast surface \
+                  never shows it"
+    )]
     pub fn history(&self) -> &[Notification] {
         &self.history
     }
 
+    #[allow(
+        dead_code,
+        reason = "collapsible app groups are the notification centre's (Stage 7)"
+    )]
     pub fn is_collapsed(&self, app_name: &str) -> bool {
         self.collapsed.contains(app_name)
     }
 
     /// Flips one app's group between collapsed and expanded in the centre
     /// view.
+    #[allow(
+        dead_code,
+        reason = "collapsible app groups are the notification centre's (Stage 7)"
+    )]
     pub fn toggle_collapsed(&mut self, app_name: &str) {
         if !self.collapsed.remove(app_name) {
             self.collapsed.insert(app_name.to_string());
@@ -877,11 +926,17 @@ impl Store {
         ids
     }
 
-    /// Removes every toast whose [`ExpiryPolicy`] has elapsed as of `now`,
-    /// returning their ids so the caller can emit `NotificationClosed(id,
-    /// 1)` for each. History is untouched — expiry only ever affects the
-    /// toast stack.
+    /// Removes every toast whose whole on-screen life ([`visible_policy`] —
+    /// the [`ExpiryPolicy`] rest span plus the entrance/exit animation
+    /// bracket) has elapsed as of `now`, returning their ids so the caller
+    /// can emit `NotificationClosed(id, 1)` for each. History is untouched —
+    /// expiry only ever affects the toast stack.
+    ///
+    /// A **paused** toast (hovered — style guide §5) can never expire here,
+    /// with no branch of its own: [`Stopwatch::elapsed`] simply stops
+    /// advancing while paused, so the comparison below stops moving too.
     pub fn expire_toasts(&mut self, now: Instant, limits: &Limits) -> Vec<u32> {
+        let envelope = Duration::from_millis(u64::from(limits.toast_envelope_ms));
         let mut expired = Vec::new();
         self.toasts.retain(|toast| {
             let policy = expiry_policy(
@@ -889,7 +944,8 @@ impl Store {
                 toast.notification.urgency,
                 limits.toast_idle_ms,
             );
-            if has_expired(policy, toast.stopwatch.elapsed(now)) {
+            let life = visible_policy(policy, envelope);
+            if has_expired(life, toast.stopwatch.elapsed(now)) {
                 expired.push(toast.notification.id);
                 false
             } else {
@@ -972,6 +1028,10 @@ mod tests {
         Limits {
             icon_tile: 36.0,
             toast_idle_ms: 5000,
+            // Zero, so every pre-existing test in this file keeps asserting
+            // about the *rest* span alone; the two tests that care about the
+            // entrance/exit bracket set it explicitly.
+            toast_envelope_ms: 0,
             toast_max_stack: 3,
             history_cap: 100,
         }
@@ -1926,6 +1986,53 @@ mod tests {
         let expired = store.expire_toasts(after, &limits);
         assert_eq!(expired, vec![1]);
         assert!(store.toasts().is_empty());
+    }
+
+    #[test]
+    fn a_toast_stays_on_screen_through_its_entrance_and_exit_animations() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        // The real theme's bracket: 350 ms slide-in + 1000 ms fade-out around
+        // a 5000 ms rest span — style guide §5's 6.35 s total.
+        let limits = Limits {
+            toast_envelope_ms: 1350,
+            ..limits()
+        };
+        store.notify(notification(1, "app-a", now), 0, false, now, &limits);
+
+        let rest_over = now + Duration::from_millis(5000);
+        assert!(
+            store.expire_toasts(rest_over, &limits).is_empty(),
+            "the rest span ending is not the end of the card — the fade-out still has to play"
+        );
+
+        let still_fading = now + Duration::from_millis(6349);
+        assert!(store.expire_toasts(still_fading, &limits).is_empty());
+
+        let total = now + Duration::from_millis(6350);
+        assert_eq!(store.expire_toasts(total, &limits), vec![1]);
+        assert!(store.toasts().is_empty());
+    }
+
+    #[test]
+    fn the_animation_envelope_never_expires_a_never_expiring_toast() {
+        let now = Instant::now();
+        let mut store = Store::new();
+        let limits = Limits {
+            toast_envelope_ms: 1350,
+            ..limits()
+        };
+        store.notify(
+            notification_with_urgency(1, "app-a", Urgency::Critical, now),
+            0,
+            false,
+            now,
+            &limits,
+        );
+
+        let far_future = now + Duration::from_secs(3600);
+        assert!(store.expire_toasts(far_future, &limits).is_empty());
+        assert_eq!(store.toasts().len(), 1);
     }
 
     #[test]

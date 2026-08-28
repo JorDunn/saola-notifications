@@ -1,13 +1,20 @@
 //! The D-Bus bridge: both frozen interfaces, served headlessly.
 //!
-//! PLAN.md Stage 3 builds this file with no UI behind it at all —
-//! `main.rs` is still a plain `#[tokio::main]` runner (see its own doc
-//! comment) that spawns [`run`] and logs whatever [`DaemonEvent`] it
-//! forwards. Nothing here decides what a notification *means* yet (that is
-//! Stage 4's pure `store.rs`) or shows anything on screen (Stage 5's
-//! layershell surfaces) — this file's whole job is to answer the bus
-//! correctly and hand raw, unparsed call data across a channel for a later
-//! stage to interpret.
+//! Nothing here decides what a notification *means* (that is `store.rs`'s
+//! pure model) or shows anything on screen (that is `main.rs`'s layershell
+//! daemon and `modules/toast.rs`) — this file's whole job is to answer the
+//! bus correctly and hand raw, unparsed call data across a channel for
+//! `main.rs` to interpret.
+//!
+//! **Stage 5 changed who drives this file.** Stage 3 shipped a `run`
+//! function that connected, called [`serve`], parked on
+//! `std::future::pending()` to keep the connection alive, and called
+//! `std::process::exit(0)` for the second-instance case. All of that now
+//! lives in `main.rs`'s `dbus_worker_stream` — an `iced::Subscription`,
+//! because a `process::exit` from inside a stream tears the process down
+//! mid-frame instead of letting iced's own event loop shut down cleanly.
+//! [`serve`] is this module's only entry point; [`emit_notification_closed`]
+//! is its only exit.
 //!
 //! # Serving vs. proxying (teaching note, same split as
 //! `saola-capture::dbus` and `saola-session::modules::inhibit`)
@@ -68,8 +75,10 @@
 //! - `io.saola.Notifications1` taken means another **`saola-notifications`
 //!   process** already owns it — nothing else could legitimately claim
 //!   this desktop's own reverse-DNS name. That is a genuine second
-//!   instance, and [`run`] exits the whole process with `std::process::
-//!   exit(0)` rather than let two daemons fight over one D-Bus contract.
+//!   instance. [`serve`] reports that as
+//!   [`ServeOutcome::AlreadySecondInstance`] and `main.rs` shuts the daemon
+//!   down with `iced::exit()` (process exit code 0) rather than let two
+//!   daemons fight over one D-Bus contract.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -174,17 +183,13 @@ fn capabilities() -> Vec<&'static str> {
 /// each event with `tracing::info!(?event, ..)` without every future stage
 /// having to write its own `Display`.
 ///
-/// `#[allow(dead_code)]`: every field here is *constructed* (each served
-/// method below builds one) but never *read* — `main.rs`'s Stage 3 drain
-/// loop only ever formats a whole event via `Debug` (`?event`), which
-/// dead-code analysis does not count as a real read (the same situation
-/// `config_watch.rs`'s Stage 2 module-level allow documents: a type is
-/// inert until the stage that actually consumes its fields exists).
-/// Stage 5's `iced::Daemon::update` is that consumer — remove this allow
-/// once it's the one matching on these variants and reading their fields
-/// for real.
+/// Stages 3 and 4 carried a `#[allow(dead_code)]` here, because every field
+/// was *constructed* by a served method and never *read* (the Stage 3 drain
+/// loop only formatted whole events via `Debug`, which dead-code analysis
+/// does not count as a read). **Stage 5 removed it**:
+/// `main.rs::dbus_worker_stream` now matches on every variant and reads
+/// every field on its way into the daemon's own `Message`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum DaemonEvent {
     /// A `Notify` call. `id` is already resolved (a fresh allocation, or
     /// `replaces_id` echoed back) by the time this is sent — see
@@ -313,7 +318,8 @@ impl NotificationsService {
     }
 
     /// `CloseNotification(id)`. Always emits `NotificationClosed(id, 3)` —
-    /// reason `3`, "the CALL_CLOSE_NOTIFICATION method was called", the
+    /// [`store::CloseReason::CloseNotification`], "the
+    /// CALL_CLOSE_NOTIFICATION method was called", the
     /// one reason this method is always entitled to claim regardless of
     /// whatever a later stage's store believes about that id (nothing
     /// tracks live notification state yet, so there is nothing to check
@@ -326,7 +332,8 @@ impl NotificationsService {
     ) {
         tracing::info!(id, "org.freedesktop.Notifications: CloseNotification");
 
-        if let Err(err) = Self::notification_closed(&emitter, id, 3).await {
+        let reason = store::CloseReason::CloseNotification.as_u32();
+        if let Err(err) = Self::notification_closed(&emitter, id, reason).await {
             tracing::warn!(
                 id,
                 error = %err,
@@ -368,9 +375,10 @@ impl NotificationsService {
         )
     }
 
-    /// Emitted by [`Self::close_notification`] today; Stage 4/5's expiry
-    /// policy and click-dismiss will emit it with reasons `1`
-    /// (expired) and `2` (user-dismissed) respectively.
+    /// Emitted three ways, all live as of Stage 5: `CloseNotification`
+    /// answers its own call with reason `3` (just above), and the toast
+    /// surface's expiry and click-dismiss reach this through
+    /// [`emit_notification_closed`] with reasons `1` and `2`.
     #[zbus(signal)]
     async fn notification_closed(
         emitter: &SignalEmitter<'_>,
@@ -502,13 +510,11 @@ impl ControlService {
 /// hint this crate has no use for either way just isn't present, exactly as
 /// if the sender had never included it.
 ///
-/// `#[allow(dead_code)]`: nothing calls this outside `#[cfg(test)]` yet —
-/// same "inert until its consuming stage exists" shape as `DaemonEvent`'s
-/// own Stage 3 allow, just above in this file. Stage 5 calls this once per
-/// `DaemonEvent::Notify` before handing the result to `store::parse_hints`;
-/// remove this (and the same allow on every private helper below it) once
-/// that wiring lands.
-#[allow(dead_code)]
+/// Called once per `DaemonEvent::Notify`, from
+/// `main.rs::dbus_worker_stream`, before the result is handed to
+/// `store::parse_hints`. (Stage 4 shipped this behind a
+/// `#[allow(dead_code)]` because nothing called it yet; Stage 5 removed the
+/// allow along with the one on [`DaemonEvent`].)
 pub fn hints_to_plain(hints: &HashMap<String, OwnedValue>) -> HashMap<String, store::HintValue> {
     hints
         .iter()
@@ -610,8 +616,8 @@ pub enum ServeOutcome {
     /// everything built on it in later stages work either way.
     Serving { notifications_owned: bool },
     /// Another `saola-notifications` process already owns
-    /// `io.saola.Notifications1` — see [`run`]'s doc comment for what
-    /// happens next.
+    /// `io.saola.Notifications1` — see this module's "Name claims" doc
+    /// comment for what happens next.
     AlreadySecondInstance,
 }
 
@@ -692,79 +698,34 @@ pub async fn serve(
     }
 }
 
-/// Connects to the session bus, serves both interfaces via [`serve`], and
-/// then holds the connection alive for the rest of the process's life.
+/// Emits `NotificationClosed(id, reason)` on
+/// `org.freedesktop.Notifications` from *outside* a served method.
 ///
-/// # Why this never returns on the happy path
+/// # Why this wrapper exists (teaching note)
 ///
-/// `zbus::Connection` is `#[must_use]` for a reason: dropping the last
-/// handle to it closes the socket and tears down every object the
-/// `ObjectServer` was holding. zbus dispatches each inbound call on its
-/// own task (`spawn_tasks_for_methods`, on by default), so nothing here
-/// needs to *poll* the connection directly — but something still has to
-/// keep it in scope, which is all `std::future::pending::<()>().await`
-/// does. `main.rs`'s Stage 3 body spawns this as its one background task
-/// and separately drains `events` on the receiving end (see that file's
-/// own doc comment for why the drain loop is *not* inlined here — a
-/// second background task, not this one, owns "log what came in").
+/// `#[zbus(signal)]` declarations inside a `#[zbus::interface]` block expand
+/// into associated functions on the handler struct — that is how
+/// [`NotificationsService::close_notification`] emits its own reason-`3`
+/// signal, using the `SignalEmitter` zbus injects into the method. Reasons
+/// `1` (expired) and `2` (user-dismissed) have no method call behind them:
+/// they are decided by the UI, in `main.rs`'s `update`, which holds a
+/// `Connection` rather than a `&NotificationsService`.
 ///
-/// # The one path that ends the process
+/// [`SignalEmitter::new`] is what bridges the two — it binds a connection to
+/// an object path, which is everything the generated emitter needs. This
+/// function exists so `main.rs` never has to know either the path or the
+/// fact that `NotificationsService` is the type carrying that emitter, both
+/// of which stay private to this module.
 ///
-/// `std::process::exit(0)` fires on exactly one condition: another
-/// `saola-notifications` is already running (Architecture: "`io.saola.
-/// Notifications1` taken -> second instance -> exit 0"). Every other
-/// failure (no session bus at all, an object-registration error) degrades
-/// to a logged error and this future simply returning — `events` is
-/// dropped with it, so `main.rs`'s drain loop sees the channel close and
-/// the process exits normally rather than being left silently running
-/// with no D-Bus surface at all.
-pub async fn run(events: mpsc::Sender<DaemonEvent>) {
-    let connection = match Connection::session().await {
-        Ok(connection) => connection,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "saola-notifications: could not connect to the session bus — the D-Bus bridge is \
-                 inert for this run"
-            );
-            return;
-        }
-    };
-
-    match serve(&connection, events).await {
-        Ok(ServeOutcome::Serving {
-            notifications_owned,
-        }) => {
-            if notifications_owned {
-                tracing::info!(
-                    "saola-notifications: serving org.freedesktop.Notifications at \
-                     {NOTIFICATIONS_OBJECT_PATH} and io.saola.Notifications1 at \
-                     {CONTROL_OBJECT_PATH}"
-                );
-            } else {
-                tracing::info!(
-                    "saola-notifications: org.freedesktop.Notifications is already owned by \
-                     another notification daemon — serving only io.saola.Notifications1 at \
-                     {CONTROL_OBJECT_PATH}"
-                );
-            }
-            std::future::pending::<()>().await;
-        }
-        Ok(ServeOutcome::AlreadySecondInstance) => {
-            tracing::info!(
-                "saola-notifications: another instance already owns io.saola.Notifications1 — \
-                 exiting cleanly rather than running two daemons"
-            );
-            std::process::exit(0);
-        }
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "saola-notifications: could not serve the D-Bus interfaces — the bridge is inert \
-                 for this run"
-            );
-        }
-    }
+/// Errors are returned rather than logged here: the caller is a
+/// `Task::future` that already has a warning to attach the id and reason to.
+pub async fn emit_notification_closed(
+    connection: &Connection,
+    id: u32,
+    reason: u32,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection, NOTIFICATIONS_OBJECT_PATH)?;
+    NotificationsService::notification_closed(&emitter, id, reason).await
 }
 
 #[cfg(test)]
