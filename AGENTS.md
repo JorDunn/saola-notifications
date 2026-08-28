@@ -36,13 +36,43 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 > Everything Stages 5 and 6 shipped is unchanged apart from one fix:
 > `Daemon::on_notify` now resyncs **both** surfaces, because a `Notify`
 > always lands in history and therefore always changes an open centre's
-> height. Remaining: the saola-capture bridge and auto-DND (Stage 8), and
-> the real `io.saola.Notifications1` properties (Stage 9 — they still answer
-> with placeholder values; `CentreOpen` reads `Daemon::centre.is_open()` and
-> `DndManual` reads `Daemon::dnd_manual`, both written in exactly one place
-> each). PLAN.md is the staged build plan and its **Context**,
-> **Architecture**, and **Frozen external contracts** sections are binding;
-> read them before any implementation work. This file summarizes the rules
+> height.
+>
+> **Stage 8 done — the capture bridge and auto-DND.**
+> `src/modules/capture_bridge.rs` consumes the four frozen `io.saola.Capture1`
+> signals via a bare `zbus::MatchRule` (no proxy) plus a second `MatchRule`
+> on `org.freedesktop.DBus`'s `NameOwnerChanged`, both merged in one
+> `tokio::select!` loop on a second `Connection::session()` (Stage 5's own
+> D-Bus worker owns the first; the two are independent `iced::Subscription`s
+> with no shared connection). `CaptureTaken`/`RecordingFinished`/`Error` push
+> a native toast (`app_name = "saola-capture"`) through the same
+> `Daemon::push_notification` path a bus `Notify` uses, with a real id from
+> `Daemon::capture_ids` — a *separate* range (`0x8000_0000` upward) from
+> `dbus.rs`'s bus-facing `IdAllocator`, reserved by construction rather than
+> shared, so `NotificationClosed` for these is a real id like any other.
+> Auto-DND's own state (`Daemon::recording`,
+> `modules::capture_bridge::RecordingState`) turns on for
+> `RecordingStarted` and off for **either** `RecordingFinished` **or**
+> `Error` — a live finding, not PLAN.md's literal words: reading
+> `saola-capture::dbus`'s own recording-finalization code shows a failed
+> recording emits `Error` *instead of* `RecordingFinished`, never both, so
+> treating only `RecordingFinished` as the "off" trigger would leak
+> auto-DND on forever after any recording failure. `Daemon::set_recording`
+> is the one place `recording_dnd` is written and logged. The
+> `NameOwnerChanged` leak guard clears it if capture vanishes mid-recording
+> — confirmed live by actually killing the capture process, not only by
+> unit test. `store.rs::decode_path_str` (now `pub(crate)`) decodes
+> `CaptureTaken`'s thumbnail; `image`'s `webp` feature was added this stage
+> because saola-capture's *default* `image-format` is `webp`, not `png` —
+> found live, a real gap in the naive "png decoder only" reading of PLAN.md's
+> own task prose. Remaining: the real `io.saola.Notifications1` properties
+> (Stage 9 — they still answer with placeholder values; `CentreOpen` reads
+> `Daemon::centre.is_open()`, `DndManual` reads `Daemon::dnd_manual`,
+> `DndActive` should read `store::effective_dnd(dnd_manual, recording_dnd)`,
+> all written in exactly one place each). PLAN.md is the staged build plan
+> and its **Context**, **Architecture**, and **Frozen external contracts**
+> sections are binding; read them before any implementation work. This file
+> summarizes the rules
 > that must hold in every stage.
 
 ## Commands
@@ -127,7 +157,11 @@ confirmation needs a real niri session.
 - **DND policy**: `effective_dnd = manual || recording`. Critical urgency
   bypasses manual DND (config-gated) but NEVER recording auto-DND — no
   toast is ever burned into a screencast. Suppressed notifications still
-  land in history.
+  land in history. `recording` turns on for `RecordingStarted` and off for
+  **either** `RecordingFinished` or `Error` (a failed recording emits one or
+  the other, never both — `modules::capture_bridge`'s module doc comment),
+  plus a `NameOwnerChanged` leak guard if `saola-capture` vanishes off the
+  bus while it was on.
 
 ## Module pattern (binding)
 

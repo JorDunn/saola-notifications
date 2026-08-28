@@ -54,13 +54,31 @@ iced = { version = "0.14", default-features = false, features = [
     "image-without-codecs",
 ] }
 # See the `iced` essay above: PNG decode for the `image-path`/`icon_data`
-# hint aliases (Stage 4). `default-features = false` + `png` only — no
-# `rayon` (this crate decodes one small icon at a time, not a batch worth
-# parallelizing) and none of `image`'s other format codecs (unneeded per the
-# essay above; each pulls its own extra dependency — `webp` alone would add
-# `image-webp`, `avif` would add `ravif`+`rgb`, etc. — for formats nothing in
-# the frozen contracts or style guide calls for).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# hint aliases (Stage 4). `default-features = false` + `png` — no `rayon`
+# (this crate decodes one small icon at a time, not a batch worth
+# parallelizing) and none of `image`'s *other* format codecs (unneeded per
+# the essay above; each pulls its own extra dependency — `avif` would add
+# `ravif`+`rgb`, etc. — for formats nothing in the frozen contracts or style
+# guide calls for).
+#
+# `webp` added — 2026-08-28 (Stage 8), found live, not guessed: capture-
+# native `CaptureTaken` toasts decode their thumbnail through this same
+# `image::open` path (`store::decode_path_str`), and a live `Screenshot`
+# call against `saola-capture`'s *default* config
+# (`saola-capture::config::ImageFormat`'s own `#[default]` is `Webp`, not
+# `Png` — verified in `saola-capture/src/config.rs`) returned a `.webp`
+# path. Without this feature every capture-native screenshot toast would
+# silently fall back to the fallback tile — a real, common-case gap in
+# Stage 8's headline feature, not a hypothetical one; `image`'s own
+# manifest (`image-0.25.10/Cargo.toml`) shows `webp = ["dep:image-webp"]`,
+# a pure-Rust decoder with no system `libwebp` dependency, so this is the
+# same "one small extra dependency, no C bindings" shape `png` itself
+# already is — not the heavier `avif`/`tiff`/etc. codecs this file already
+# declined above.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "webp",
+] }
 # Layer-shell binding for iced, waycrate/exwlshelleventloop, same version
 # line as every sibling with a layer-shell surface (`saola-panel`,
 # `saola-capture`: `iced_layershell = "0.19"`, resolves to 0.19.1). Owns
@@ -156,6 +174,27 @@ tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
 ] }
+
+[dev-dependencies]
+# Survey — 2026-08-28 (Stage 8). `modules::capture_bridge`'s tests build
+# real `zbus::Message` signal frames with `zbus::Message::signal(..)
+# .build(body)` to exercise the actual wire parse (`decode_capture_signal`/
+# `decode_owner_change`) without a live bus — the same technique
+# `saola-panel::modules::claude`'s own `usage_signal` test helper uses.
+# `Message::build`'s bound is `B: serde::Serialize + zbus::zvariant::
+# DynamicType`, and a generic test helper covering every signal's tuple
+# shape has to name that bound itself, which means naming the `serde`
+# crate. Already resolved in this crate's dependency tree today (via
+# `toml`'s and `zbus`'s own transitive `serde` — `cargo tree -i serde`
+# confirms one shared version), so this is a direct declaration of an
+# already-resolved crate, not new weight, and it is test-only
+# (`[dev-dependencies]`, not `[dependencies]`) because nothing outside
+# `#[cfg(test)]` code in this crate ever names `serde` itself — unlike
+# `saola-panel`, which pulls it into `[dependencies]` because it also uses
+# `serde_json` for real, non-test work. Default features (`std`, `derive`
+# not needed — every body built here is a tuple of types serde already
+# implements `Serialize` for).
+serde = "1"
 
 [profile.dev.package."*"]
 # Same rationale as `saola-capture`'s Cargo.toml (see its dated teaching

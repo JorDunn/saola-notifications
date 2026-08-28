@@ -352,10 +352,24 @@ struct Daemon {
     /// Manual do-not-disturb (`io.saola.Notifications1.SetDnd`), seeded from
     /// `notifications.toml`'s `dnd-default`.
     dnd_manual: bool,
-    /// Auto-DND while saola-capture is recording — Stage 8 sets it; nothing
-    /// does yet. `effective_dnd = manual || recording` (AGENTS.md), and
-    /// critical urgency bypasses the manual half only, never this one.
+    /// Auto-DND while saola-capture is recording. `effective_dnd = manual
+    /// || recording` (AGENTS.md), and critical urgency bypasses the manual
+    /// half only, never this one. **Source of truth is [`Self::recording`]
+    /// below** (Stage 8) — this bool is what `store.rs`'s DND policy
+    /// actually reads, kept as its own field (rather than recomputed from
+    /// `recording` on every read) purely so `Self::set_recording` has one
+    /// place to notice "did this actually change" for its log line.
     recording_dnd: bool,
+    /// Auto-DND's own state machine (Stage 8) — see
+    /// `modules::capture_bridge::RecordingState`'s doc comment. Written
+    /// only from [`Self::set_recording`], driven by
+    /// `Message::CaptureBridge`'s `RecordingStarted`/`RecordingFinished`/
+    /// `Error`/`CaptureVanished` arms (`Self::on_capture_bridge`).
+    recording: modules::capture_bridge::RecordingState,
+    /// Ids for capture-native toasts (Stage 8) — a separate range from
+    /// `dbus.rs`'s bus-facing `IdAllocator`; see
+    /// `modules::capture_bridge::NativeIdAllocator`'s doc comment for why.
+    capture_ids: modules::capture_bridge::NativeIdAllocator,
 }
 
 impl Daemon {
@@ -389,6 +403,8 @@ impl Daemon {
             centre_clamp: CentreClamp::Unknown,
             connection: None,
             recording_dnd: false,
+            recording: modules::capture_bridge::RecordingState::default(),
+            capture_ids: modules::capture_bridge::NativeIdAllocator::default(),
         };
 
         (daemon, Task::none())
@@ -415,6 +431,8 @@ impl Daemon {
             }
 
             Message::Notify(request) => self.on_notify(request),
+
+            Message::CaptureBridge(event) => self.on_capture_bridge(event),
 
             // `dbus.rs`'s `close_notification` has already emitted
             // `NotificationClosed(id, 3)` itself — the one reason a method
@@ -556,17 +574,138 @@ impl Daemon {
     }
 
     /// One `Notify` call, all the way from parsed request to a card on
-    /// screen. The exact call sequence Stage 4's handoff specifies.
+    /// screen. The exact call sequence Stage 4's handoff specifies —
+    /// [`Self::push_notification`] is the shared tail Stage 8's capture
+    /// bridge also joins.
     fn on_notify(&mut self, request: NotifyRequest) -> Task<Message> {
         let now = Instant::now();
+        let replaces_id = request.replaces_id;
+        let notification = request.into_notification(now);
+        self.push_notification(notification, replaces_id, now)
+    }
+
+    /// One `io.saola.Capture1` event, fully handled: any auto-DND
+    /// transition is applied *first* (via [`Self::set_recording`]), then a
+    /// native toast is pushed if the event carries one — matching PLAN.md
+    /// Stage 8's ordering guarantee ("the recording-finished toast shows
+    /// after DND lifts"). See `modules::capture_bridge`'s module doc
+    /// comment for why `Error` folds into the same "recording ended"
+    /// transition as `RecordingFinished`.
+    fn on_capture_bridge(&mut self, event: modules::capture_bridge::Message) -> Task<Message> {
+        use modules::capture_bridge::Message as CaptureEvent;
+
+        match event {
+            CaptureEvent::RecordingStarted { kind } => {
+                let state = self.recording.on_started();
+                self.set_recording(state, Some(&kind));
+                Task::none()
+            }
+            CaptureEvent::RecordingFinished { path } => {
+                let state = self.recording.on_finished();
+                self.set_recording(state, None);
+                let toast = modules::capture_bridge::recording_toast(&path);
+                self.push_capture_toast(toast)
+            }
+            CaptureEvent::CaptureTaken { path, image } => {
+                let toast = modules::capture_bridge::screenshot_toast(&path, image);
+                self.push_capture_toast(toast)
+            }
+            CaptureEvent::Error { message } => {
+                let state = self.recording.on_finished();
+                self.set_recording(state, None);
+                let toast = modules::capture_bridge::error_toast(&message);
+                self.push_capture_toast(toast)
+            }
+            CaptureEvent::CaptureVanished => {
+                let (state, leaked) = self.recording.on_vanished();
+                self.set_recording(state, None);
+                if leaked {
+                    tracing::warn!(
+                        "saola-notifications: saola-capture vanished from the bus while a \
+                         recording was active — the auto-DND leak guard cleared it"
+                    );
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// The one place [`Self::recording`]/[`Self::recording_dnd`] are
+    /// written. `kind` is `Some` only for a `RecordingStarted` transition
+    /// (purely for the log line below; nothing branches on it) and `None`
+    /// for every other caller. A no-op (no log line) when the transition
+    /// doesn't actually change whether auto-DND is active — `on_finished`/
+    /// `on_vanished` are both idempotent by design (see
+    /// `modules::capture_bridge::RecordingState`'s doc comment), and a
+    /// no-op log line every time one of those fires on an already-idle
+    /// state would be noise, not signal.
+    fn set_recording(
+        &mut self,
+        state: modules::capture_bridge::RecordingState,
+        kind: Option<&str>,
+    ) {
+        self.recording = state;
+        let recording = state.is_active();
+        if recording == self.recording_dnd {
+            return;
+        }
+        self.recording_dnd = recording;
+        tracing::info!(
+            recording,
+            ?kind,
+            effective = store::effective_dnd(self.dnd_manual, recording),
+            "saola-notifications: auto-DND (recording) changed"
+        );
+    }
+
+    /// Builds and pushes one capture-native toast through the same `Store`
+    /// path a bus `Notify` uses ([`Self::push_notification`]), with an id
+    /// from [`Self::capture_ids`] rather than `dbus.rs`'s bus-facing
+    /// allocator — see `modules::capture_bridge::NativeIdAllocator`'s doc
+    /// comment for why the two are separate. `replaces_id` is always `0`:
+    /// every capture-native event (a screenshot, a saved recording, a
+    /// failure) is its own fresh notification, never an update to a
+    /// previous one.
+    fn push_capture_toast(&mut self, toast: modules::capture_bridge::NativeToast) -> Task<Message> {
+        let now = Instant::now();
+        let id = self.capture_ids.allocate();
+        let notification = store::Notification {
+            id,
+            app_name: modules::capture_bridge::APP_NAME.to_string(),
+            app_icon: String::new(),
+            summary: toast.summary,
+            body: toast.body,
+            actions: Vec::new(),
+            urgency: store::Urgency::Normal,
+            image: toast.image,
+            expire_timeout: -1,
+            transient: false,
+            resident: false,
+            posted_at: now,
+        };
+        self.push_notification(notification, 0, now)
+    }
+
+    /// Applies one already-built [`store::Notification`] to the store and
+    /// syncs both surfaces — the shared tail [`Self::on_notify`] (a bus
+    /// `Notify`) and [`Self::push_capture_toast`] (a capture-native toast,
+    /// Stage 8) both join. Allocating `id` and stamping `posted_at` are
+    /// each caller's own job (a bus id comes from `dbus.rs`'s allocator
+    /// inside the D-Bus worker; a capture-native id from
+    /// [`Self::capture_ids`]) — this method only knows what to do once a
+    /// fully-formed notification exists.
+    fn push_notification(
+        &mut self,
+        notification: store::Notification,
+        replaces_id: u32,
+        now: Instant,
+    ) -> Task<Message> {
         let suppress = store::should_suppress_toast(
-            request.urgency,
+            notification.urgency,
             self.dnd_manual,
             self.recording_dnd,
             self.config.critical_bypasses_dnd,
         );
-        let replaces_id = request.replaces_id;
-        let notification = request.into_notification(now);
         // Captured before the move below — Stage 6 evidence (`busctl … Notify`
         // with an `actions` array) reads this count off the log rather than
         // off a pixel, since a pill can't be aimed at in the nested-niri
@@ -595,7 +734,7 @@ impl Daemon {
             self.store.pause_toast(hovered, now);
         }
 
-        // Both surfaces. A `Notify` always lands in history — even one
+        // Both surfaces. A push always lands in history — even one
         // suppressed by do-not-disturb, which touches the toast stack not at
         // all — so an open centre has just grown a row and needs to be
         // respawned a card taller. This is the one path that changes the
@@ -670,6 +809,7 @@ impl Daemon {
 
         Subscription::batch([
             Subscription::run(dbus_worker_stream),
+            modules::capture_bridge::subscription().map(Message::CaptureBridge),
             self.toasts.subscription(&self.store).map(Message::Toast),
             self.centre.subscription().map(Message::Centre),
             surface_size,
@@ -1008,6 +1148,10 @@ enum Message {
     /// A `Notify` call, already parsed (hints resolved, markup stripped,
     /// image decoded) by the worker. See [`NotifyRequest`].
     Notify(NotifyRequest),
+    /// Wraps [`modules::capture_bridge::Message`] — the four frozen
+    /// `io.saola.Capture1` signals, plus the `NameOwnerChanged` leak guard
+    /// (Stage 8).
+    CaptureBridge(modules::capture_bridge::Message),
     /// `org.freedesktop.Notifications.CloseNotification(id)`.
     CloseNotification(u32),
     /// `io.saola.Notifications1.ToggleCentre` — "toggling while open closes".

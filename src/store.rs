@@ -483,7 +483,13 @@ fn decode_image_data(
 /// job). Freedesktop icon-theme lookup (`XDG_DATA_DIRS`, the icon theme
 /// spec's fallback chain, SVG-vs-PNG preference) is real scope on its own
 /// and is out of bounds for this stage; see the Stage 4 handoff.
-fn decode_path_str(path: &str, icon_tile: f32) -> Option<image::Handle> {
+///
+/// `pub(crate)` since Stage 8: `modules::capture_bridge` decodes
+/// `CaptureTaken`'s thumbnail with this exact function (PLAN.md Stage 8's
+/// own words — "decode the png at `path` via the Stage 4 file-path
+/// decoder") rather than re-deriving the same absolute-path-or-`file://`
+/// rule a second time.
+pub(crate) fn decode_path_str(path: &str, icon_tile: f32) -> Option<image::Handle> {
     let resolved = if let Some(rest) = path.strip_prefix("file://") {
         rest
     } else if path.starts_with('/') {

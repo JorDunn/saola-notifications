@@ -34,6 +34,19 @@
 //!    notification is*, it belongs in `store.rs` where it can be tested
 //!    without a compositor.
 //!
+//! 3. **`capture_bridge` has neither a state struct nor a `view`.** It is a
+//!    background signal bridge, not a surface — it maps no layer-shell
+//!    window and renders nothing, ever (PLAN.md's Stage 8 task prose says
+//!    so explicitly). [`capture_bridge::subscription`] is therefore a free
+//!    function rather than a method on some per-instance state. The one
+//!    thing that could look like "state" — auto-DND's own
+//!    [`capture_bridge::RecordingState`], and the id allocator for its
+//!    native toasts — lives on `Daemon` (`main.rs`) instead of in this
+//!    module, because both are genuinely shared with `store.rs`'s DND
+//!    policy and `main.rs`'s own notification-push path, not private view
+//!    state the way `toast::Toasts`'s hovered-card tracking is. See
+//!    `capture_bridge`'s own module doc comment for the full reasoning.
+//!
 //! Everything else the panel's doc comment says still applies verbatim —
 //! zero hardcoded colors/sizes, three-color rule, an absent source renders
 //! nothing rather than killing the process, and every module maps to a
@@ -41,5 +54,6 @@
 //! AGENTS.md's one documented exception, and it is gated to run only while
 //! a card is actually on screen — see [`toast::Toasts::subscription`]).
 
+pub mod capture_bridge;
 pub mod centre;
 pub mod toast;
