@@ -13,7 +13,7 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: **Stage 7 done — the notification centre.**
+> Status: **Stage 9 done — the control interface finished.**
 > `src/modules/centre.rs` is style guide §6's centre: 460 px
 > (`sizes.notification_centre_width`), anchored 72 px from the top and 26 px
 > from the right, history grouped by application into collapsible groups
@@ -65,11 +65,35 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 > `CaptureTaken`'s thumbnail; `image`'s `webp` feature was added this stage
 > because saola-capture's *default* `image-format` is `webp`, not `png` —
 > found live, a real gap in the naive "png decoder only" reading of PLAN.md's
-> own task prose. Remaining: the real `io.saola.Notifications1` properties
-> (Stage 9 — they still answer with placeholder values; `CentreOpen` reads
-> `Daemon::centre.is_open()`, `DndManual` reads `Daemon::dnd_manual`,
-> `DndActive` should read `store::effective_dnd(dnd_manual, recording_dnd)`,
-> all written in exactly one place each). PLAN.md is the staged build plan
+> own task prose.
+>
+> **Stage 9 done — the control interface finished.** All four
+> `io.saola.Notifications1` properties are live and emit `PropertiesChanged`.
+> `dbus::ControlState` (four plain fields, `NotificationCount`/`DndActive`/
+> `DndManual`/`CentreOpen`) sits behind an `Arc<Mutex<_>>` —
+> `dbus::SharedControlState` — created in `dbus::serve` and handed back to
+> `main.rs` on `Message::BusReady`; `ControlService`'s property getters only
+> ever read it, `Daemon::sync_control_state` is the only writer.
+> `dbus::ControlState::changed` is the pure diff (unit-tested) that decides
+> which properties actually changed since the last write; `dbus::
+> sync_control_state` writes the new snapshot then calls the zbus-generated
+> `<property>_changed(emitter)` once per changed property, via
+> `connection.object_server().interface::<_, ControlService>(path)` (the
+> same `InterfaceRef` pattern zbus's own `issue_310` regression test uses —
+> `main.rs`'s `update` cannot hold a `SignalEmitter` the way a served method
+> does). `NotificationCount` is `Store::history().len()` — the same list the
+> centre shows, not the live toast-stack count. `sync_control_state` is
+> called from every `update` arm that can change one of the four
+> properties, and is a cheap no-op before `BusReady`. `DismissAll` and
+> `Dismiss` were changed to call `Store::clear_all`/`dismiss_notification`
+> (both toast stack *and* history) rather than `dismiss_toast`/
+> `dismiss_all_toasts` (toast-only) — the latter is now gone,
+> the former's `Message::Dismiss` scope is a Stage 9 judgment call
+> (see the Stage 9 handoff). `io.saola.Notifications1` is documented as a
+> FROZEN contract in README.md's Architecture section — method and property
+> semantics live there now, not only in PLAN.md.
+>
+> PLAN.md is the staged build plan
 > and its **Context**, **Architecture**, and **Frozen external contracts**
 > sections are binding; read them before any implementation work. This file
 > summarizes the rules

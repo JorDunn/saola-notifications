@@ -1,0 +1,172 @@
+name: saola-notifications
+# Technical Names — product, protocol, tool, and format names; CLI verbs,
+# subcommands, and flags; config-file keys; D-Bus interface, method, and
+# property names; and other domain nouns this project's docs use as fixed
+# technical vocabulary rather than general English. See AGENTS.md's Style
+# Guide Links entry for the ste100 invocation this file backs. Format copied
+# from /home/jordan/Developer/saola-capture/.ste-glossary.yml.
+technical_nouns:
+  - word: saola
+    approved_meaning: The Saola desktop environment and its project family name.
+  - word: saola-notifications
+    approved_meaning: This project — the Saola notification daemon, toast stack, and notification centre.
+  - word: saola-panel
+    approved_meaning: The Saola desktop panel app, and the source of its notification-badge indicator.
+  - word: saola-capture
+    approved_meaning: The Saola screenshot and screen-recording app.
+  - word: saola-theme
+    approved_meaning: The Saola design-system crate that supplies colors, sizes, and motion tokens.
+  - word: niri
+    approved_meaning: The niri Wayland compositor.
+  - word: wayland
+    approved_meaning: The Wayland display protocol.
+  - word: rust
+    approved_meaning: The Rust programming language.
+  - word: dbus
+    approved_meaning: The D-Bus message bus.
+  - word: freedesktop
+    approved_meaning: The freedesktop.org notification-daemon standard this project implements.
+  - word: toml
+    approved_meaning: The TOML config-file language this project uses.
+  - word: cargo
+    approved_meaning: The Rust package manager and build tool.
+  - word: clippy
+    approved_meaning: The Rust lint tool cargo runs.
+  - word: git
+    approved_meaning: The git version-control tool.
+  - word: mit
+    approved_meaning: The MIT software license.
+  - word: apache
+    approved_meaning: The Apache software license.
+  - word: gnu
+    approved_meaning: The GNU project.
+  - word: license
+    approved_meaning: The legal terms a project is under.
+    inflections: [licenses]
+  - word: dir
+    approved_meaning: A directory, short for directory.
+  - word: sh
+    approved_meaning: A shell command-line example.
+  - word: jordan
+    approved_meaning: The maintainer of this project.
+  - word: capture
+    approved_meaning: Part of the name saola-capture, or the act of making a screenshot or a screen recording.
+    inflections: [captures, captured, capturing]
+  - word: disturb
+    approved_meaning: Part of the term do-not-disturb.
+  - word: toggle
+    approved_meaning: An on-screen control that turns a condition on or off.
+    inflections: [toggles]
+  - word: operator
+    approved_meaning: A person who uses this project.
+    inflections: [operators]
+  - word: output
+    approved_meaning: The exact result a method or a property gives.
+  - word: act
+    approved_meaning: To carry out a method's normal result.
+    part_of_speech: verb
+  - word: command
+    approved_meaning: A D-Bus method call.
+    inflections: [commands]
+  - word: "true"
+    approved_meaning: The boolean value "on".
+  - word: "false"
+    approved_meaning: The boolean value "off".
+  - word: daemon
+    approved_meaning: The background service process this project runs (`saola-notifications`).
+  - word: notification
+    approved_meaning: A message an app sends to report an event to the user.
+    inflections: [notifications]
+  - word: centre
+    approved_meaning: The notification centre, the on-screen panel that lists saved notifications.
+  - word: toast
+    approved_meaning: A short on-screen card that shows one notification.
+    inflections: [toasts]
+  - word: stack
+    approved_meaning: The set of toast cards on screen at one time.
+  - word: history
+    approved_meaning: The saved list of past notifications the notification centre shows.
+  - word: badge
+    approved_meaning: The small count shown on the saola-panel indicator.
+  - word: indicator
+    approved_meaning: The saola-panel icon that shows notification status.
+  - word: contract
+    approved_meaning: A fixed set of names and actions two programs agree to use.
+    inflections: [contracts]
+  - word: signal
+    approved_meaning: A one-way D-Bus message a service sends with no reply expected.
+    inflections: [signals]
+  - word: path
+    approved_meaning: A D-Bus object path, or a location on disk.
+    inflections: [paths]
+  - word: dismissal
+    approved_meaning: The act of a user closing one notification.
+    inflections: [dismissals]
+  - word: id
+    approved_meaning: A number that names one specific notification.
+  - word: property
+    approved_meaning: A named, readable value a D-Bus interface exposes.
+    inflections: [properties]
+  - word: method
+    approved_meaning: A named action a D-Bus interface exposes.
+    inflections: [methods]
+  - word: interface
+    approved_meaning: A named set of D-Bus methods, properties, and signals.
+    inflections: [interfaces]
+  - word: object
+    approved_meaning: Part of the term "object path", a D-Bus address.
+  - word: software
+    approved_meaning: A program, or programs in general.
+  - word: condition
+    approved_meaning: A named state a value can be in.
+    inflections: [conditions]
+  - word: config
+    approved_meaning: A config file, short for configuration.
+  - word: setting
+    approved_meaning: One named config value.
+    inflections: [settings]
+  - word: notifications.toml
+    approved_meaning: This project's own config file name.
+  - word: dnd-default
+    approved_meaning: The config key that sets do-not-disturb at startup.
+  - word: history-cap
+    approved_meaning: The config key that sets the largest number of saved notifications.
+  - word: critical-bypasses-dnd
+    approved_meaning: The config key that lets a critical notification show during manual do-not-disturb.
+  - word: do-not-disturb
+    approved_meaning: The condition that stops toast cards from showing.
+  - word: dnd
+    approved_meaning: Short for do-not-disturb.
+  - word: io.saola.notifications1
+    approved_meaning: This project's own D-Bus control interface name.
+  - word: org.freedesktop.notifications
+    approved_meaning: The standard freedesktop D-Bus notification interface name.
+  - word: io.saola.capture1
+    approved_meaning: The saola-capture app's own D-Bus interface name.
+  - word: togglecentre
+    approved_meaning: The D-Bus method that opens or closes the notification centre.
+  - word: opencentre
+    approved_meaning: The D-Bus method that opens the notification centre.
+  - word: closecentre
+    approved_meaning: The D-Bus method that closes the notification centre.
+  - word: setdnd
+    approved_meaning: The D-Bus method that sets manual do-not-disturb.
+  - word: dismiss
+    approved_meaning: The D-Bus method that removes one notification.
+    part_of_speech: verb
+  - word: dismissall
+    approved_meaning: The D-Bus method that removes every notification.
+  - word: notificationclosed
+    approved_meaning: The standard freedesktop D-Bus signal a client receives when a notification closes.
+  - word: propertieschanged
+    approved_meaning: The standard D-Bus signal a client receives when a property value changes.
+  - word: notificationcount
+    approved_meaning: The D-Bus property that reports the number of notifications in history.
+  - word: dndactive
+    approved_meaning: The D-Bus property that reports whether do-not-disturb applies right now.
+  - word: dndmanual
+    approved_meaning: The D-Bus property that reports whether a user set do-not-disturb by hand.
+  - word: centreopen
+    approved_meaning: The D-Bus property that reports whether the notification centre is open.
+technical_verbs: []
+preferred_terms: {}

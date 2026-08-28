@@ -349,6 +349,12 @@ struct Daemon {
     /// `None` until `BusReady` arrives, and every emitter degrades to a
     /// logged warning rather than a panic in that window.
     connection: Option<zbus::Connection>,
+    /// The live snapshot behind `io.saola.Notifications1`'s four properties
+    /// (Stage 9) — the same `Arc` [`dbus::ControlService`]'s property
+    /// getters read. `None` until `BusReady` arrives (same window as
+    /// [`Self::connection`]); [`Self::sync_control_state`] is a no-op until
+    /// both are `Some`.
+    control_state: Option<dbus::SharedControlState>,
     /// Manual do-not-disturb (`io.saola.Notifications1.SetDnd`), seeded from
     /// `notifications.toml`'s `dnd-default`.
     dnd_manual: bool,
@@ -402,6 +408,7 @@ impl Daemon {
             centre_surface: None,
             centre_clamp: CentreClamp::Unknown,
             connection: None,
+            control_state: None,
             recording_dnd: false,
             recording: modules::capture_bridge::RecordingState::default(),
             capture_ids: modules::capture_bridge::NativeIdAllocator::default(),
@@ -425,9 +432,14 @@ impl Daemon {
                 iced::exit()
             }
 
-            Message::BusReady(connection) => {
+            Message::BusReady(connection, control_state) => {
                 self.connection = Some(connection);
-                Task::none()
+                self.control_state = Some(control_state);
+                // Seeds the fresh snapshot with whatever this daemon's
+                // state already is at this point (e.g. `dnd-default` from
+                // `notifications.toml`) — the first `get-property` a
+                // caller makes must not see stale zeroes.
+                self.sync_control_state()
             }
 
             Message::Notify(request) => self.on_notify(request),
@@ -444,42 +456,65 @@ impl Daemon {
                 self.sync_toast_surface()
             }
 
+            // `io.saola.Notifications1.Dismiss(id)` — the control
+            // interface's own dismiss, not a toast card's click-dismiss
+            // (that's `modules::toast::Message`, which calls
+            // `dismiss_toast` directly). "I am done with this
+            // notification" from outside the process means everywhere,
+            // the same as the centre's own per-item dismiss — an unknown
+            // id is a silent no-op, no bus error (PLAN.md Stage 9).
             Message::Dismiss(id) => {
-                if self.store.dismiss_toast(id) {
+                if self.store.dismiss_notification(id) {
                     let emit = self.emit_closed(&[id], store::CloseReason::UserDismissed);
-                    Task::batch([emit, self.sync_toast_surface()])
+                    Task::batch([
+                        emit,
+                        self.sync_toast_surface(),
+                        self.sync_centre_surface(),
+                        self.sync_control_state(),
+                    ])
                 } else {
                     Task::none()
                 }
             }
 
+            // `io.saola.Notifications1.DismissAll()` — PLAN.md Stage 9's
+            // design guidance: "closes every toast and history entry, one
+            // NotificationClosed(id, 2) per notification". `store::clear_all`
+            // is the same call the centre's own clear-all row makes — this
+            // is not a toast-only dismissal (`dismiss_toast` is that).
             Message::DismissAll => {
-                let ids = self.store.dismiss_all_toasts();
+                let ids = self.store.clear_all();
                 if ids.is_empty() {
-                    return Task::none();
+                    Task::none()
+                } else {
+                    let emit = self.emit_closed(&ids, store::CloseReason::UserDismissed);
+                    Task::batch([
+                        emit,
+                        self.sync_toast_surface(),
+                        self.sync_centre_surface(),
+                        self.sync_control_state(),
+                    ])
                 }
-                let emit = self.emit_closed(&ids, store::CloseReason::UserDismissed);
-                Task::batch([emit, self.sync_toast_surface()])
             }
 
             Message::SetDnd(manual) => {
                 self.set_dnd(manual);
-                Task::none()
+                self.sync_control_state()
             }
 
             Message::ToggleCentre => {
                 self.centre.toggle();
-                self.sync_centre_surface()
+                Task::batch([self.sync_centre_surface(), self.sync_control_state()])
             }
 
             Message::OpenCentre => {
                 self.centre.set_open(true);
-                self.sync_centre_surface()
+                Task::batch([self.sync_centre_surface(), self.sync_control_state()])
             }
 
             Message::CloseCentre => {
                 self.centre.set_open(false);
-                self.sync_centre_surface()
+                Task::batch([self.sync_centre_surface(), self.sync_control_state()])
             }
 
             Message::Centre(inner) => {
@@ -510,7 +545,17 @@ impl Daemon {
                 // Both surfaces: a dismissal or a clear-all in the centre can
                 // take a card off the toast stack as well, and every one of
                 // these messages can change the centre's own height.
-                Task::batch([emit, self.sync_toast_surface(), self.sync_centre_surface()])
+                // `sync_control_state` covers every possible control-state
+                // change this arm can produce: `NotificationCount` (a
+                // dismissal or clear-all), `CentreOpen` (Escape/focus-loss
+                // close), and `DndManual`/`DndActive` (the centre's own DND
+                // toggle).
+                Task::batch([
+                    emit,
+                    self.sync_toast_surface(),
+                    self.sync_centre_surface(),
+                    self.sync_control_state(),
+                ])
             }
 
             // The compositor answered the measuring surface (see
@@ -598,7 +643,7 @@ impl Daemon {
             CaptureEvent::RecordingStarted { kind } => {
                 let state = self.recording.on_started();
                 self.set_recording(state, Some(&kind));
-                Task::none()
+                self.sync_control_state()
             }
             CaptureEvent::RecordingFinished { path } => {
                 let state = self.recording.on_finished();
@@ -625,7 +670,7 @@ impl Daemon {
                          recording was active — the auto-DND leak guard cleared it"
                     );
                 }
-                Task::none()
+                self.sync_control_state()
             }
         }
     }
@@ -738,8 +783,17 @@ impl Daemon {
         // suppressed by do-not-disturb, which touches the toast stack not at
         // all — so an open centre has just grown a row and needs to be
         // respawned a card taller. This is the one path that changes the
-        // centre's height without the user touching the centre.
-        Task::batch([self.sync_toast_surface(), self.sync_centre_surface()])
+        // centre's height without the user touching the centre. It is also
+        // the one path `NotificationCount` (history length) grows from —
+        // `sync_control_state` picks that up here, and (via
+        // `on_capture_bridge` calling `set_recording` before a capture-native
+        // toast reaches this function) any `DndActive` change that happened
+        // in the same event is folded into the same emission.
+        Task::batch([
+            self.sync_toast_surface(),
+            self.sync_centre_surface(),
+            self.sync_control_state(),
+        ])
     }
 
     /// Every `id` here is one this daemon spawned itself (registered
@@ -1042,6 +1096,65 @@ impl Daemon {
         );
     }
 
+    /// The `io.saola.Notifications1` snapshot as `self` sees it right now —
+    /// the value [`Self::sync_control_state`] writes into
+    /// [`Self::control_state`]. A pure read of already-live fields; nothing
+    /// here decides anything, which is what keeps
+    /// [`dbus::ControlState::changed`] (the actual "did anything change"
+    /// logic) testable without a `Daemon` at all.
+    fn control_state_snapshot(&self) -> dbus::ControlState {
+        dbus::ControlState {
+            // `history()`'s length is bounded by `notifications.toml`'s
+            // `history-cap`, which is itself a small human-chosen number
+            // (`usize`, config.rs) — `unwrap_or(u32::MAX)` is a saturating
+            // fallback for a cap nobody would sanely configure, not a path
+            // this crate expects to exercise.
+            notification_count: u32::try_from(self.store.history().len()).unwrap_or(u32::MAX),
+            dnd_active: store::effective_dnd(self.dnd_manual, self.recording_dnd),
+            dnd_manual: self.dnd_manual,
+            centre_open: self.centre.is_open(),
+        }
+    }
+
+    /// Pushes [`Self::control_state_snapshot`] into the shared snapshot
+    /// [`dbus::ControlService`]'s property getters read, and emits
+    /// `PropertiesChanged` for whichever properties actually changed. A
+    /// no-op — cheaply, before any `Task` is spawned — until `BusReady` has
+    /// arrived (see [`Self::control_state`]'s doc comment), and every call
+    /// site above is a message arm that can plausibly change one of the
+    /// four properties: a `Notify` (`NotificationCount`), a dismissal or
+    /// clear-all (`NotificationCount`), `SetDnd`/the centre's own DND toggle
+    /// (`DndManual`/`DndActive`), a recording transition
+    /// (`DndActive`), and every centre open/close path, including Escape
+    /// and focus-loss (`CentreOpen`).
+    fn sync_control_state(&self) -> Task<Message> {
+        let (Some(connection), Some(state)) = (self.connection.clone(), self.control_state.clone())
+        else {
+            return Task::none();
+        };
+
+        let new = self.control_state_snapshot();
+        Task::future(async move {
+            match dbus::sync_control_state(&connection, &state, new).await {
+                Ok(changed) if !changed.is_empty() => {
+                    tracing::debug!(
+                        ?changed,
+                        "saola-notifications: io.saola.Notifications1 properties changed"
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "saola-notifications: could not emit PropertiesChanged for \
+                         io.saola.Notifications1"
+                    );
+                }
+            }
+        })
+        .discard()
+    }
+
     /// Emit `NotificationClosed(id, reason)` for each id, off the update
     /// thread.
     ///
@@ -1143,8 +1256,10 @@ enum Message {
     /// The daemon should stop, and why.
     Shutdown(ShutdownReason),
     /// [`dbus_worker_stream`] is serving, and here is the connection it
-    /// serves on — stored so `update` can emit signals through it.
-    BusReady(zbus::Connection),
+    /// serves on plus the live control-state snapshot [`dbus::ControlService`]
+    /// reads from — stored so `update` can emit signals (and property
+    /// changes) through them.
+    BusReady(zbus::Connection, dbus::SharedControlState),
     /// A `Notify` call, already parsed (hints resolved, markup stripped,
     /// image decoded) by the worker. See [`NotifyRequest`].
     Notify(NotifyRequest),
@@ -1322,6 +1437,7 @@ fn dbus_worker_stream() -> impl Stream<Item = Message> {
         match dbus::serve(&connection, events_tx).await {
             Ok(dbus::ServeOutcome::Serving {
                 notifications_owned,
+                control_state,
             }) => {
                 if notifications_owned {
                     tracing::info!(
@@ -1342,7 +1458,7 @@ fn dbus_worker_stream() -> impl Stream<Item = Message> {
                 }
 
                 if sender
-                    .send(Message::BusReady(connection.clone()))
+                    .send(Message::BusReady(connection.clone(), control_state))
                     .await
                     .is_err()
                 {
@@ -1800,5 +1916,100 @@ mod tests {
             "§5: a default toast's whole life is the theme's toast_total"
         );
         assert_eq!(limits.history_cap, config.history_cap);
+    }
+
+    // ------------------------------------------------------------------
+    // Daemon::control_state_snapshot — the io.saola.Notifications1
+    // properties, computed from live daemon state (Stage 9). Emission
+    // itself (whether `PropertiesChanged` actually fires) is
+    // `dbus::ControlState::changed`'s job, tested in `dbus.rs`; this is
+    // only "does the snapshot agree with what `self` says right now".
+    // ------------------------------------------------------------------
+
+    fn boot_daemon() -> Daemon {
+        let (mut daemon, _boot) = Daemon::boot();
+        daemon.limits.history_cap = 100;
+        daemon
+    }
+
+    #[test]
+    fn a_fresh_daemon_snapshots_all_defaults() {
+        let daemon = boot_daemon();
+        // A machine with `dnd-default = true` in its own notifications.toml
+        // would fail this assertion for the wrong reason, so pin the field
+        // this test actually cares about rather than trusting the default.
+        let mut daemon = daemon;
+        daemon.dnd_manual = false;
+
+        assert_eq!(
+            daemon.control_state_snapshot(),
+            dbus::ControlState {
+                notification_count: 0,
+                dnd_active: false,
+                dnd_manual: false,
+                centre_open: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_snapshot_tracks_manual_dnd() {
+        let mut daemon = boot_daemon();
+        daemon.set_dnd(true);
+
+        let snapshot = daemon.control_state_snapshot();
+        assert!(snapshot.dnd_manual);
+        assert!(
+            snapshot.dnd_active,
+            "effective_dnd = manual || recording — manual alone is enough"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_tracks_recording_dnd_independently_of_manual() {
+        let mut daemon = boot_daemon();
+        daemon.set_recording(
+            modules::capture_bridge::RecordingState::default().on_started(),
+            None,
+        );
+
+        let snapshot = daemon.control_state_snapshot();
+        assert!(!snapshot.dnd_manual, "recording never sets the manual flag");
+        assert!(snapshot.dnd_active, "recording alone makes DND effective");
+    }
+
+    #[test]
+    fn the_snapshot_tracks_the_centre_open_flag() {
+        let mut daemon = boot_daemon();
+        daemon.centre.set_open(true);
+
+        assert!(daemon.control_state_snapshot().centre_open);
+    }
+
+    #[test]
+    fn the_snapshot_counts_history_not_the_toast_stack() {
+        let mut daemon = boot_daemon();
+        let _ = daemon.on_notify(notify_request(1, "slack"));
+        let _ = daemon.on_notify(notify_request(2, "slack"));
+
+        // Both notifications land in history; the second one replaces
+        // slack's toast card in place rather than adding a second one
+        // (style guide §6) — so this is the case that actually
+        // distinguishes "history length" from "toast stack length".
+        assert_eq!(daemon.store.toasts().len(), 1);
+        assert_eq!(daemon.control_state_snapshot().notification_count, 2);
+    }
+
+    #[test]
+    fn sync_control_state_is_a_no_op_before_bus_ready() {
+        let daemon = boot_daemon();
+        assert!(daemon.connection.is_none());
+        assert!(daemon.control_state.is_none());
+        // Nothing to assert on the returned `Task` beyond "this does not
+        // panic" — `Task` carries no `PartialEq` to compare against
+        // `Task::none()`. The real guarantee (no connection means no
+        // signal is ever emitted) is exercised live, not here — see the
+        // Stage 9 handoff's manual evidence.
+        let _ = daemon.sync_control_state();
     }
 }

@@ -957,14 +957,6 @@ impl Store {
         self.toasts.len() != before
     }
 
-    /// Clears every toast (`DismissAll`), returning the ids that were on
-    /// screen so the caller can emit `NotificationClosed(id, 2)` for each.
-    pub fn dismiss_all_toasts(&mut self) -> Vec<u32> {
-        let ids: Vec<u32> = self.toasts.iter().map(|t| t.notification.id).collect();
-        self.toasts.clear();
-        ids
-    }
-
     /// Removes one notification **everywhere** — the history list and, if it
     /// is still on screen, the toast stack — as a dismissal from the
     /// notification centre (Stage 7). Returns whether anything was actually
@@ -2112,20 +2104,6 @@ mod tests {
         assert_eq!(ids, vec![2]);
         // Already gone — a second dismiss reports nothing happened.
         assert!(!store.dismiss_toast(1));
-    }
-
-    #[test]
-    fn dismiss_all_toasts_clears_the_stack_and_returns_ids() {
-        let now = Instant::now();
-        let mut store = Store::new();
-        let limits = limits();
-        store.notify(notification(1, "app-a", now), 0, false, now, &limits);
-        store.notify(notification(2, "app-b", now), 0, false, now, &limits);
-
-        let mut ids = store.dismiss_all_toasts();
-        ids.sort_unstable();
-        assert_eq!(ids, vec![1, 2]);
-        assert!(store.toasts().is_empty());
     }
 
     #[test]

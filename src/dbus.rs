@@ -13,8 +13,9 @@
 //! lives in `main.rs`'s `dbus_worker_stream` — an `iced::Subscription`,
 //! because a `process::exit` from inside a stream tears the process down
 //! mid-frame instead of letting iced's own event loop shut down cleanly.
-//! [`serve`] is this module's only entry point; [`emit_notification_closed`]
-//! and [`emit_action_invoked`] (Stage 6) are its only exits.
+//! [`serve`] is this module's only entry point; [`emit_notification_closed`],
+//! [`emit_action_invoked`] (Stage 6) and [`sync_control_state`] (Stage 9) are
+//! its only exits.
 //!
 //! # Serving vs. proxying (teaching note, same split as
 //! `saola-capture::dbus` and `saola-session::modules::inhibit`)
@@ -82,6 +83,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use iced::futures::channel::mpsc;
 use zbus::Connection;
@@ -399,13 +401,161 @@ impl NotificationsService {
 }
 
 // ============================================================================
+// ControlState — the live snapshot behind io.saola.Notifications1's four
+// properties. This is Stage 9's whole design: `ControlService` cannot borrow
+// `main.rs`'s `Daemon` (it runs on the zbus object server, dispatched from
+// wherever a bus call arrives), so the two sides share a small `Arc<Mutex<_>>`
+// snapshot instead — `Daemon::sync_control_state` writes it every time the
+// daemon's own state changes, and the property getters below only ever read
+// it. Four plain fields behind one lock, not four atomics, because every
+// write updates all four together (see `Daemon::control_state_snapshot`) and
+// a torn read across four independent atomics could hand a caller a
+// `DndActive` computed against a `DndManual` from a different moment.
+// ============================================================================
+
+/// A frozen instant of `io.saola.Notifications1`'s four properties. See
+/// PLAN.md's Frozen external contracts section for what each one means;
+/// `NotificationCount`'s exact definition (history length — the same list
+/// the notification centre shows) is pinned in README.md's frozen-contract
+/// section, not just here, because it's the one property whose meaning
+/// wasn't obvious from its name alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ControlState {
+    pub notification_count: u32,
+    pub dnd_active: bool,
+    pub dnd_manual: bool,
+    pub centre_open: bool,
+}
+
+/// One of the four `io.saola.Notifications1` properties, named so
+/// [`sync_control_state`] can dispatch to the right zbus-generated
+/// `<property>_changed` method without stringly-typed matching on the
+/// property's wire name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlProperty {
+    NotificationCount,
+    DndActive,
+    DndManual,
+    CentreOpen,
+}
+
+impl ControlState {
+    /// Which properties differ between `self` (the snapshot as it was) and
+    /// `new` (the snapshot as it is now) — pure, so this is the one part of
+    /// Stage 9's design worth a table of unit tests rather than only manual
+    /// `busctl --user monitor` evidence. The order is fixed (declaration
+    /// order) purely so a test can assert an exact `Vec` instead of a set.
+    fn changed(&self, new: &ControlState) -> Vec<ControlProperty> {
+        let mut changed = Vec::new();
+        if self.notification_count != new.notification_count {
+            changed.push(ControlProperty::NotificationCount);
+        }
+        if self.dnd_active != new.dnd_active {
+            changed.push(ControlProperty::DndActive);
+        }
+        if self.dnd_manual != new.dnd_manual {
+            changed.push(ControlProperty::DndManual);
+        }
+        if self.centre_open != new.centre_open {
+            changed.push(ControlProperty::CentreOpen);
+        }
+        changed
+    }
+}
+
+/// The snapshot [`ControlService`]'s property getters read and
+/// [`sync_control_state`] writes. `Arc<Mutex<_>>` rather than a bare
+/// `ControlState` because the two sides run on different tasks (the zbus
+/// dispatch loop reading, `main.rs`'s `update` writing) with no `&mut`
+/// relationship between them — the same reason `dbus.rs`'s served methods
+/// hold an `mpsc::Sender` clone rather than a `&mut` channel.
+pub type SharedControlState = Arc<Mutex<ControlState>>;
+
+/// Reads the current snapshot, recovering from a poisoned lock rather than
+/// panicking — AGENTS.md's no-panic rule, applied defensively: nothing in
+/// this crate ever panics while holding this lock (every critical section
+/// below is a plain field copy), so poisoning should never actually happen,
+/// but `.unwrap()` on the lock result would turn a hypothetical future bug
+/// elsewhere into a bus-call panic instead of a stale read.
+fn read_control_state(state: &SharedControlState) -> ControlState {
+    match state.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// Writes `new` into `state` and emits `PropertiesChanged` for whichever of
+/// the four properties actually differ from what was there before —
+/// PLAN.md Stage 9's "only emit when the value actually changed" rule, via
+/// [`ControlState::changed`].
+///
+/// # Why this needs the connection, not just the state (teaching note)
+///
+/// Writing `new` into `state` is enough for the *next* `get-property` call
+/// to see it — [`ControlService`]'s getters read straight through the
+/// `Mutex`. But an already-subscribed caller (`busctl --user monitor`, the
+/// saola-panel indicator) only learns about a change that already happened
+/// via the `PropertiesChanged` *signal*, which has to be emitted by
+/// something holding a `SignalEmitter` for [`CONTROL_OBJECT_PATH`] — the
+/// same "no emitter outside a served method" gap [`emit_notification_closed`]
+/// exists to close, applied to properties instead of a plain signal.
+/// `connection.object_server().interface::<_, ControlService>(path)` is how
+/// a caller outside the interface's own methods gets at that emitter (via
+/// `InterfaceRef`), exactly the pattern zbus's own `issue_310` regression
+/// test uses. Each zbus-generated `<property>_changed` call re-reads its
+/// property's getter internally, which is why `state` is written *first* —
+/// otherwise the signal would carry the stale value.
+pub async fn sync_control_state(
+    connection: &Connection,
+    state: &SharedControlState,
+    new: ControlState,
+) -> zbus::Result<Vec<ControlProperty>> {
+    let changed = {
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let changed = guard.changed(&new);
+        *guard = new;
+        changed
+    };
+
+    if changed.is_empty() {
+        return Ok(changed);
+    }
+
+    let iface_ref = connection
+        .object_server()
+        .interface::<_, ControlService>(CONTROL_OBJECT_PATH)
+        .await?;
+    let iface = iface_ref.get().await;
+    let emitter = iface_ref.signal_emitter();
+
+    for property in &changed {
+        match property {
+            ControlProperty::NotificationCount => {
+                iface.notification_count_changed(emitter).await?;
+            }
+            ControlProperty::DndActive => iface.dnd_active_changed(emitter).await?,
+            ControlProperty::DndManual => iface.dnd_manual_changed(emitter).await?,
+            ControlProperty::CentreOpen => iface.centre_open_changed(emitter).await?,
+        }
+    }
+
+    Ok(changed)
+}
+
+// ============================================================================
 // ControlService — io.saola.Notifications1.
 // ============================================================================
 
 /// The daemon-side implementation of `io.saola.Notifications1`. No id
-/// allocator needed here — every method is a simple trigger.
+/// allocator needed here — every method is a simple trigger. `state` is the
+/// live snapshot [`Daemon::sync_control_state`] (`main.rs`) writes; the
+/// property getters below only ever read it.
 struct ControlService {
     events: mpsc::Sender<DaemonEvent>,
+    state: SharedControlState,
 }
 
 impl ControlService {
@@ -460,33 +610,34 @@ impl ControlService {
         self.forward(DaemonEvent::Dismiss { id }, "Dismiss");
     }
 
-    /// Placeholder — no store exists yet to count against. Stage 9 wires
-    /// this (and the three properties below) to live state and starts
-    /// emitting `PropertiesChanged`, per PLAN.md's Frozen external
-    /// contracts section ("all properties emit `PropertiesChanged`").
+    /// History length — the same list the notification centre shows,
+    /// capped at `notifications.toml`'s `history-cap`. See README.md's
+    /// frozen-contract section for why this and not the live toast-stack
+    /// count is what the panel badge reflects.
     #[zbus(property)]
     fn notification_count(&self) -> u32 {
-        0
+        read_control_state(&self.state).notification_count
     }
 
-    /// Placeholder for `effective_dnd = manual || recording` (Architecture)
-    /// — always `false` until Stage 8/9 wire real DND state.
+    /// `effective_dnd = manual || recording` (AGENTS.md Architecture) — the
+    /// value `main.rs::store::effective_dnd` computes, mirrored here by
+    /// [`Daemon::sync_control_state`] every time either half changes.
     #[zbus(property)]
     fn dnd_active(&self) -> bool {
-        false
+        read_control_state(&self.state).dnd_active
     }
 
-    /// Placeholder for the manual-only DND flag `SetDnd` above will
-    /// eventually toggle.
+    /// The manual-only DND flag `SetDnd` (above) and the centre's own
+    /// toggle both write.
     #[zbus(property)]
     fn dnd_manual(&self) -> bool {
-        false
+        read_control_state(&self.state).dnd_manual
     }
 
-    /// Placeholder — no centre surface exists until Stage 7.
+    /// Whether the notification centre surface is currently mapped.
     #[zbus(property)]
     fn centre_open(&self) -> bool {
-        false
+        read_control_state(&self.state).centre_open
     }
 }
 
@@ -608,14 +759,20 @@ fn byte_array_field(value: &Value<'_>) -> Option<Vec<u8>> {
 // ============================================================================
 
 /// What [`serve`] settled into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ServeOutcome {
     /// This process is serving `io.saola.Notifications1` (and is therefore
     /// the daemon). `notifications_owned` says whether it *also* owns
     /// `org.freedesktop.Notifications` — `false` when another notification
     /// daemon (mako, dunst, …) already does; the control interface and
     /// everything built on it in later stages work either way.
-    Serving { notifications_owned: bool },
+    /// `control_state` is the live snapshot [`ControlService`]'s property
+    /// getters read; `main.rs` keeps it and writes every change through
+    /// [`sync_control_state`].
+    Serving {
+        notifications_owned: bool,
+        control_state: SharedControlState,
+    },
     /// Another `saola-notifications` process already owns
     /// `io.saola.Notifications1` — see this module's "Name claims" doc
     /// comment for what happens next.
@@ -629,6 +786,12 @@ pub async fn serve(
     connection: &Connection,
     events: mpsc::Sender<DaemonEvent>,
 ) -> zbus::Result<ServeOutcome> {
+    // The live snapshot behind `io.saola.Notifications1`'s four properties —
+    // see this module's "ControlState" doc section. Created here (not
+    // passed in) because this is the one place `ControlService` itself is
+    // constructed; `main.rs` gets its clone back via `ServeOutcome::Serving`.
+    let control_state: SharedControlState = Arc::new(Mutex::new(ControlState::default()));
+
     connection
         .object_server()
         .at(
@@ -645,6 +808,7 @@ pub async fn serve(
             CONTROL_OBJECT_PATH,
             ControlService {
                 events: events.clone(),
+                state: control_state.clone(),
             },
         )
         .await?;
@@ -690,6 +854,7 @@ pub async fn serve(
         Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
             Ok(ServeOutcome::Serving {
                 notifications_owned,
+                control_state,
             })
         }
         Ok(RequestNameReply::InQueue | RequestNameReply::Exists) | Err(zbus::Error::NameTaken) => {
@@ -849,6 +1014,124 @@ mod tests {
         assert_eq!(
             capabilities(),
             vec!["body", "actions", "icon-static", "persistence"]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // ControlState::changed — the pure diff Stage 9's PropertiesChanged
+    // emission is gated on.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_unchanged_snapshot_reports_nothing_changed() {
+        let state = ControlState {
+            notification_count: 3,
+            dnd_active: true,
+            dnd_manual: true,
+            centre_open: false,
+        };
+        assert!(state.changed(&state).is_empty());
+    }
+
+    #[test]
+    fn notification_count_alone_is_reported_alone() {
+        let before = ControlState::default();
+        let after = ControlState {
+            notification_count: 1,
+            ..before
+        };
+        assert_eq!(
+            before.changed(&after),
+            vec![ControlProperty::NotificationCount]
+        );
+    }
+
+    #[test]
+    fn dnd_active_alone_is_reported_alone() {
+        let before = ControlState::default();
+        let after = ControlState {
+            dnd_active: true,
+            ..before
+        };
+        assert_eq!(before.changed(&after), vec![ControlProperty::DndActive]);
+    }
+
+    #[test]
+    fn dnd_manual_alone_is_reported_alone() {
+        let before = ControlState::default();
+        let after = ControlState {
+            dnd_manual: true,
+            ..before
+        };
+        assert_eq!(before.changed(&after), vec![ControlProperty::DndManual]);
+    }
+
+    #[test]
+    fn centre_open_alone_is_reported_alone() {
+        let before = ControlState::default();
+        let after = ControlState {
+            centre_open: true,
+            ..before
+        };
+        assert_eq!(before.changed(&after), vec![ControlProperty::CentreOpen]);
+    }
+
+    /// Recording starting flips `dnd_manual: false` into `dnd_active: true`
+    /// in one snapshot — the two-properties-in-one-write case Stage 8's
+    /// `set_recording` produces.
+    #[test]
+    fn two_properties_changing_together_are_both_reported_in_declaration_order() {
+        let before = ControlState::default();
+        let after = ControlState {
+            notification_count: 1,
+            dnd_active: true,
+            ..before
+        };
+        assert_eq!(
+            before.changed(&after),
+            vec![
+                ControlProperty::NotificationCount,
+                ControlProperty::DndActive
+            ]
+        );
+    }
+
+    #[test]
+    fn every_property_changing_is_reported_in_declaration_order() {
+        let before = ControlState::default();
+        let after = ControlState {
+            notification_count: 5,
+            dnd_active: true,
+            dnd_manual: true,
+            centre_open: true,
+        };
+        assert_eq!(
+            before.changed(&after),
+            vec![
+                ControlProperty::NotificationCount,
+                ControlProperty::DndActive,
+                ControlProperty::DndManual,
+                ControlProperty::CentreOpen,
+            ]
+        );
+    }
+
+    #[test]
+    fn read_control_state_returns_whats_written() {
+        let state: SharedControlState = Arc::new(Mutex::new(ControlState {
+            notification_count: 7,
+            dnd_active: true,
+            dnd_manual: false,
+            centre_open: true,
+        }));
+        assert_eq!(
+            read_control_state(&state),
+            ControlState {
+                notification_count: 7,
+                dnd_active: true,
+                dnd_manual: false,
+                centre_open: true,
+            }
         );
     }
 }
