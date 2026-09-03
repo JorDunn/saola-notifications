@@ -83,6 +83,18 @@ each claimed fix against the theme repo at that tag before bumping
 `Cargo.toml`'s pin, then move the row into the Stage handoff that does the
 bump. Until then the local workarounds stay exactly as they are.
 
+**2026-09-03 — acknowledged.** The `saola-theme` session replied the same
+day: all nine gaps are recorded on its side, none scheduled yet, and it
+checked every cited signature and token against its current `main`
+(`card_urgent`, `notification_card(t, alpha)`, `life_rule`/`icon_tile`
+without `alpha`, `toast_alpha`/`life_fraction` on `motion.toast_idle`,
+`panel_margin_islands = 26`, `popover_top`, `notification_centre_width`)
+and confirmed each matches this file's description. Which items ship, and
+under what names, is Jordan's call; the session will reply with the
+release tag once any land. Its `main` also carries an unreleased commit
+adding `Icon::{Power, RotateCw, Moon, UserRound}` for the greeter, which
+touches nothing listed here. Keep the `v0.13.0` pin until a tag arrives.
+
 ### Ready-to-send message
 
 Paste this to a `saola-theme` session the moment one is reachable
