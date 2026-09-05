@@ -567,3 +567,81 @@ Jordan's call):
    items still open (panel indicator module; capture flipping its
    `toasts` default), and the post-v0.1 roadmap order (per-app rules →
    notifyctl → inline reply → media footer → sounds).
+
+## Stage 11 — `HasUrgent` property (v0.2, additive)
+
+```yaml
+model: sonnet
+effort: medium
+skill: test-driven-development
+tools: [Read, Grep, Glob, Write, Edit, Bash]
+depends_on: [10]
+verify:
+  files: [src/store.rs, src/dbus.rs, src/main.rs, README.md, contrib/notifications/README.md]
+  command: "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
+```
+
+Read this PLAN.md's Frozen external contracts section, AGENTS.md, and
+`.claude/handoffs/handoff_stage_10.md` first. Then read
+`contrib/notifications/README.md` — it is the canonical contract file
+for `io.saola.Notifications1` and already carries `HasUrgent` under a
+"Planned (not yet served)" note.
+
+**Why this stage exists.** The saola-panel indicator (the consumer of
+`io.saola.Notifications1`) shows a terracotta accent for "something
+needs you". Under DND the toast is suppressed, so `NotificationCount`
+alone cannot tell the bar that a *critical* notification is waiting.
+Jordan approved adding one property on 2026-09-05; the saola-panel
+session was told it is additive and that it must not read the property
+until the release that ships it is announced. This is the first
+sanctioned change to the frozen interface since Stage 9.
+
+**Contract (binding — add it to the Frozen external contracts section
+in this file, to README.md's frozen-contract section, and move it out of
+the "Planned" note in `contrib/notifications/README.md`; ASD-STE100
+prose, `ste100 check` on both docs):**
+
+- `HasUrgent: b` on `io.saola.Notifications1`, emitting standard
+  `PropertiesChanged` in `changed_properties` like the other four.
+- `true` while history holds at least one notification with
+  `Urgency::Critical` that has **not been seen**.
+- A notification is *seen* when the centre opens after it arrived, or
+  when it arrives while the centre is already open (it is on screen).
+  Dismissal (`Dismiss`, `DismissAll`, the centre's own rows, history-cap
+  eviction) removes the entry, so it cannot count.
+- DND does **not** affect it — that is the point. Nothing else in the
+  interface changes; names and semantics of the existing six methods and
+  four properties stay exactly as served.
+
+**Implementation (test-first, pure logic inline-tested, time injected —
+AGENTS.md's resilience rules):**
+
+1. `store.rs`: `Notification` gains `seen: bool` (false on `notify`).
+   Add `Store::mark_history_seen(&mut self)` and a pure
+   `Store::has_urgent(&self) -> bool`. Unit tests: critical unseen →
+   true; critical then `mark_history_seen` → false; normal unseen →
+   false; dismissed critical → false; critical evicted by the history
+   cap → false; a second critical arriving after the first was seen →
+   true again.
+2. `main.rs`: every arm that *opens* the centre (`ToggleCentre` when
+   closed, `OpenCentre`) calls `mark_history_seen` before
+   `sync_control_state`. `on_notify` marks the new entry seen when
+   `self.centre` is open. No new tick, no new subscription.
+3. `dbus.rs`: `ControlState` gains `has_urgent: bool`;
+   `ControlState::changed` diffs it (extend its unit test);
+   `ControlService` gains `#[zbus(property)] fn has_urgent`;
+   `sync_control_state` emits `has_urgent_changed` through the same
+   `InterfaceRef` path the other four use. `Daemon::sync_control_state`
+   computes it from `Store::has_urgent`.
+4. Docs, as listed under Contract above, plus AGENTS.md's status block
+   (one short paragraph: Stage 11 done, what changed, that the panel
+   session still needs the release tag).
+
+Manual evidence for the handoff: in the nested-niri recipe from
+AGENTS.md, `notify-send -u critical` with DND on → `busctl --user
+get-property … HasUrgent` is `true` and `busctl --user monitor` shows
+`PropertiesChanged {HasUrgent: true}`; `ToggleCentre` → `false`. Do
+**not** message saola-panel from this stage — the contract-change
+message goes out with the release tag, which is Jordan's call. Put the
+ready-to-send text (property name, semantics, the tag placeholder) in
+the handoff so the release can paste it.

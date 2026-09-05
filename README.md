@@ -173,10 +173,12 @@ case).
 ### `io.saola.Notifications1` (frozen contract)
 
 `io.saola.Notifications1` is the control interface for the saola-panel
-indicator. This part of the document gives the method names, the property
-names, and the correct output for each one. Get agreement from Jordan
-before you make a name or an output here different. Other software uses
-this interface at this time.
+indicator. `contrib/notifications/README.md` is the fixed contract file
+for this interface; this section and that file must always agree. This
+part of the document gives the method names, the property names, and the
+correct output for each one. Get agreement from Jordan before you make a
+name or an output here different. Other software uses this interface at
+this time.
 
 The daemon controls this interface at the object path
 `/io/saola/Notifications1`.

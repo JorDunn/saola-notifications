@@ -256,5 +256,57 @@ technical_nouns:
     approved_meaning: To paint pixels for a surface on screen.
     part_of_speech: verb
     inflections: [draws, drew, drawn]
+  - word: contrib
+    approved_meaning: Part of the directory name contrib/notifications, this project's packaging and contract files.
+  - word: readme.md
+    approved_meaning: This project's own top-level readme file name.
+  - word: getall
+    approved_meaning: The standard D-Bus method that reads every property on an interface at once.
+  - word: nameownerchanged
+    approved_meaning: The standard D-Bus signal a client receives when a bus name gets or loses its owner.
+  - word: actioninvoked
+    approved_meaning: The standard freedesktop D-Bus signal a client receives when an operator picks a notification action.
+  - word: hasurgent
+    approved_meaning: A planned D-Bus property that will report whether an unseen critical notification exists.
+  - word: donotqueue
+    approved_meaning: The D-Bus name-request flag this project uses when it asks to own a bus name.
+  - word: replaceexisting
+    approved_meaning: A D-Bus name-request flag this project never uses.
+  - word: changed_properties
+    approved_meaning: The map inside a standard PropertiesChanged signal that carries each property's new value.
+  - word: invalidated_properties
+    approved_meaning: The set inside a standard PropertiesChanged signal that names properties with no new value given.
+  - word: owner
+    approved_meaning: The process that holds a D-Bus bus name at a given time.
+    inflections: [owners]
+  - word: consumer
+    approved_meaning: A program, such as saola-panel, that reads this project's D-Bus interface.
+    inflections: [consumers]
+  - word: glyph
+    approved_meaning: The small icon shape the saola-panel indicator shows.
+  - word: popover
+    approved_meaning: A small on-screen panel that opens next to an indicator.
+  - word: mako
+    approved_meaning: The mako notification daemon, a program this daemon may find already running.
+  - word: dunst
+    approved_meaning: The dunst notification daemon, a program this daemon may find already running.
+  - word: auto
+    approved_meaning: Part of the term auto-DND, do-not-disturb that turns on with no command from an operator.
+  - word: urgency
+    approved_meaning: The freedesktop notification field that names how severe a notification is.
+  - word: schema
+    approved_meaning: The fixed shape of a D-Bus interface — its methods, properties, and signals.
+  - word: ledger
+    approved_meaning: One of saola-panel's two layout styles for its own strip.
+  - word: islands
+    approved_meaning: One of saola-panel's two layout styles for its own strip.
+  - word: px
+    approved_meaning: Short for pixels, a unit of on-screen distance.
+  - word: strip
+    approved_meaning: The bar-shaped area of the screen saola-panel reserves for itself.
+    inflections: [strips]
+  - word: module
+    approved_meaning: One named part of a program's own source code, such as saola-panel's indicator module.
+    inflections: [modules]
 technical_verbs: []
 preferred_terms: {}

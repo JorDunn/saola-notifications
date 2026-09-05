@@ -204,9 +204,11 @@ actually happened.
 - **Frozen external contracts** (PLAN.md section of the same name):
   `org.freedesktop.Notifications` at `/org/freedesktop/Notifications`,
   `io.saola.Notifications1` at `/io/saola/Notifications1` (the saola-panel
-  indicator's contract — all properties emit `PropertiesChanged`), and the
-  four consumed `io.saola.Capture1` signals. Never change names or
-  semantics without Jordan's sign-off.
+  indicator's contract — all properties emit `PropertiesChanged`;
+  `contrib/notifications/README.md` is the canonical contract file for
+  `io.saola.Notifications1`, and README.md's own frozen-contract section
+  must agree with it), and the four consumed `io.saola.Capture1` signals.
+  Never change names or semantics without Jordan's sign-off.
 - **DND policy**: `effective_dnd = manual || recording`. Critical urgency
   bypasses manual DND (config-gated) but NEVER recording auto-DND — no
   toast is ever burned into a screencast. Suppressed notifications still
