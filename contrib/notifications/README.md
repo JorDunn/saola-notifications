@@ -102,6 +102,12 @@ names the release that adds it.
 
 ## Related
 
+- saola-panel keeps its half of this link in its own
+  `contrib/notifications/README.md`:
+  <https://github.com/JorDunn/saola-panel/blob/main/contrib/notifications/README.md>.
+  That file points at this one and gives the indicator's own drawing
+  rules, its two click bindings, and its smoke test. It does not copy
+  the method and property table above.
 - The frozen-contract part of README.md states the same contract, in
   prose form, next to the other instructions for this daemon.
 - `org.freedesktop.Notifications`, at object path
