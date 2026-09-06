@@ -226,3 +226,23 @@ existing tokens today, neither blocks anything, and both were sent to the
 | --- | --- | --- |
 | No `hit_target_bar`-tall row container. §6 now states the centre header row is `sizes.hit_target_bar` tall, but `widget::list_row_container` hardwires `sizes.list_row` and has no twin. | `modules/centre.rs::header_row` builds the band by hand: `container(...).height(hit_target_bar).align_y(Center)`. | A `widget::bar_row_container(t, content)`, or a height parameter on `list_row_container`. |
 | The three `notification_centre_*` tokens stop at the group boundary. The gap between a group's header and its cards, and the centre's horizontal padding, are not named. | `sizes.gap_tight` for the in-group gap; `sizes.island_gap` for the horizontal padding (derived: 460 − 440 = two island gaps). | Either two more centre tokens, or a sentence in §6 stating that recipe so a second consumer does not re-derive it. |
+
+**Update, 2026-09-06 (later):** both gaps are answered on `saola-theme`
+main as commit `ac6c9b8` (verified against the checkout: `git tag
+--contains ac6c9b8` is empty, so no release tag carries it yet). What lands
+on the next release-plz tag, read from the commit itself:
+
+- `widget::bar_row_container(t, content)`: the `sizes.hit_target_bar`-tall
+  twin of `list_row_container`, pure geometry, no `Surface`. Swap it into
+  `modules/centre.rs::header_row` and keep the row's own horizontal
+  `island_gap` padding.
+- `sizes.notification_centre_card_gap` (4.0): the gap inside a group,
+  header to first card and card to card. Replace `gap_tight` with it in
+  `modules/centre.rs::group_height` and the `card_height` sums.
+- The horizontal padding stays `sizes.island_gap` by design. §6 now states
+  the derivation instead of minting a token that would drift.
+- `sizes.hit_target_bar` gained a doc comment, and §6 names
+  `widget::bar_row_container` as the header band, so re-vendor
+  `docs/SAOLA-STYLE-GUIDE.md` from the tag when bumping.
+
+Do not pin until the tag exists (AGENTS.md: tags only, never `main`).
