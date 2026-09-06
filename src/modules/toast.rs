@@ -18,7 +18,12 @@
 //!   [`saola_theme::style::notification::icon_tile`], plus the
 //!   `sizes.icon_tile` / `sizes.life_rule` tokens capture had to invent as
 //!   local constants. Nothing in this file names a color, a size or a
-//!   duration of its own.
+//!   duration of its own. **As of the `saola-theme-v0.14.0` pin every one
+//!   of those helpers also takes the card's `alpha`**, so the four local
+//!   alpha-carrying copies this file used to hold (the urgent card, the
+//!   icon tile, the life rule and the action pill) are gone — each call
+//!   site now names the theme's own function. See
+//!   `docs/UPSTREAM-THEME-DEBT.md`'s "Closed" section.
 //! - **The timing became per-notification.** Capture's every toast lived
 //!   exactly `motion.toast_total`; a real `Notify` call carries its own
 //!   `expire_timeout`, and a critical one never expires at all. See "The
@@ -44,15 +49,16 @@
 //! `toast_in + rest + toast_out`, which for the theme's own default is
 //! `350 + 5000 + 1000 = 6350 ms`, §5's stated total exactly.
 //!
-//! [`card_alpha`] and [`life_fraction`] are that envelope, generalized over
-//! the rest span. saola-theme's own [`saola_theme::motion::toast_alpha`] and
-//! [`saola_theme::motion::life_fraction`] encode the same shape but hardwire
-//! `motion.toast_idle` as the rest span, so they cannot express a client's
-//! `expire_timeout` — the gap is recorded in `docs/UPSTREAM-THEME-DEBT.md`.
-//! Both functions here are built from `saola_theme::motion::fraction` and the
-//! `motion.toast_*` tokens (never a local number), and the two
-//! `matches_the_theme_*` tests below pin them to the theme's own answers for
-//! the default span, so the local generalization can never drift from §5.
+//! [`card_alpha`] and [`life_fraction`] are that envelope. The **theme**
+//! owns the arithmetic now: `saola-theme-v0.14.0` added
+//! [`saola_theme::motion::toast_alpha_over`] and
+//! [`saola_theme::motion::life_fraction_over`], which take the rest span as
+//! a parameter instead of hardwiring `motion.toast_idle`, so a client's own
+//! `expire_timeout` is expressible upstream. The two functions below are
+//! now thin adapters: they turn this crate's [`ExpiryPolicy`] (which the
+//! theme has no notion of — a card that *never* leaves is a
+//! freedesktop-notification concept, not a design-system one) into the
+//! `rest_ms` those two take.
 //!
 //! # The slide-in, without a transform (teaching note)
 //!
@@ -61,7 +67,10 @@
 //! either. Capture's two workarounds carry over verbatim:
 //!
 //! - **Travel** is a *leading spacer* that shrinks to zero
-//!   ([`slide_offset`]). The toast surface is declared exactly
+//!   ([`slide_offset`]), on [`saola_theme::motion::ease_out`]'s curve — the
+//!   same curve the theme's own `toast_alpha_over` entrance rides, so §5's
+//!   `ease-out` slide and fade play as one movement. The toast surface is
+//!   declared exactly
 //!   `sizes.notification_card_width` wide, and a layer-shell surface has no
 //!   canvas past its own negotiated size, so a spacer one card wide pushes
 //!   the card fully off the surface — indistinguishable from off-screen.
@@ -73,7 +82,7 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{Space, button, column, container, image, mouse_area, progress_bar, row, text};
+use iced::widget::{Space, column, container, image, mouse_area, progress_bar, row, text};
 use iced::{Center, Element, Length, Subscription};
 use saola_theme::{Chrome, ColorExt, Surface, Theme};
 
@@ -128,37 +137,45 @@ pub fn rest_policy(theme: &Theme, notification: &Notification) -> ExpiryPolicy {
     )
 }
 
-/// The card's opacity at `elapsed`: fade in over `motion.toast_in`, hold at
-/// `1.0` for the rest span, fade out over `motion.toast_out`, then stay at
-/// `0.0`.
+/// The card's opacity at `elapsed`: [`saola_theme::motion::toast_alpha_over`]
+/// fed this notification's own rest span — fade in over `motion.toast_in`
+/// (eased out), hold at `1.0` for the rest span, fade out over
+/// `motion.toast_out`, then stay at `0.0`.
 ///
 /// [`ExpiryPolicy::Never`] (an urgent card, or an explicit
 /// `expire_timeout` of `0`) fades in and then holds at `1.0` forever: §5's
 /// "urgent notifications ... never auto-dismiss" is about the card leaving,
-/// not about it arriving, so the entrance still plays.
+/// not about it arriving, so the entrance still plays. The theme has no way
+/// to say "never" — its rest span is a `u32` of milliseconds — so that one
+/// case is the arm below rather than an upstream call.
 pub fn card_alpha(theme: &Theme, policy: ExpiryPolicy, elapsed: Duration) -> f32 {
-    let entrance = Duration::from_millis(u64::from(theme.motion.toast_in));
-
-    if elapsed < entrance {
-        return saola_theme::motion::fraction(elapsed, theme.motion.toast_in);
+    match policy {
+        ExpiryPolicy::After(rest) => {
+            saola_theme::motion::toast_alpha_over(theme, as_millis_u32(rest), elapsed)
+        }
+        ExpiryPolicy::Never => {
+            let entrance = Duration::from_millis(u64::from(theme.motion.toast_in));
+            if elapsed < entrance {
+                // Still arriving. `toast_alpha_over` never looks at its
+                // `rest_ms` before `motion.toast_in` has elapsed (read its
+                // first branch), so any rest span returns the identical
+                // entrance curve here — which is why this arm can borrow
+                // the theme's own easing rather than re-deriving it and
+                // risking drift from §5.
+                saola_theme::motion::toast_alpha_over(theme, theme.motion.toast_idle, elapsed)
+            } else {
+                // Arrived, and never leaving.
+                1.0
+            }
+        }
     }
-
-    let ExpiryPolicy::After(rest) = policy else {
-        // Arrived, and never leaving.
-        return 1.0;
-    };
-
-    if elapsed < entrance + rest {
-        return 1.0;
-    }
-
-    let fading = elapsed.saturating_sub(entrance + rest);
-    1.0 - saola_theme::motion::fraction(fading, theme.motion.toast_out)
 }
 
-/// The life rule's remaining fraction at `elapsed`: full through the
-/// entrance (nothing to count down yet), draining linearly to `0.0` across
-/// the rest span, then empty through the fade-out.
+/// The life rule's remaining fraction at `elapsed`:
+/// [`saola_theme::motion::life_fraction_over`] fed the same rest span
+/// [`card_alpha`] gets, so the countdown and the fade stay in step — full
+/// through the entrance (nothing to count down yet), draining linearly to
+/// `0.0` across the rest span, then empty through the fade-out.
 ///
 /// `None` means **this card has no life rule at all** — §5: "urgent
 /// notifications have no life rule and never auto-dismiss". A rule that
@@ -168,24 +185,26 @@ pub fn life_fraction(theme: &Theme, policy: ExpiryPolicy, elapsed: Duration) -> 
     let ExpiryPolicy::After(rest) = policy else {
         return None;
     };
-    let entrance = Duration::from_millis(u64::from(theme.motion.toast_in));
-
-    if elapsed < entrance {
-        return Some(1.0);
-    }
-    if elapsed < entrance + rest {
-        let resting = elapsed.saturating_sub(entrance);
-        return Some(1.0 - saola_theme::motion::fraction(resting, as_millis_u32(rest)));
-    }
-    Some(0.0)
+    Some(saola_theme::motion::life_fraction_over(
+        theme,
+        as_millis_u32(rest),
+        elapsed,
+    ))
 }
 
 /// The leading spacer width standing in for §5's `translateX` — a full card
-/// width at `elapsed == 0`, shrinking linearly to `0` at `motion.toast_in`.
+/// width at `elapsed == 0`, shrinking to `0` at `motion.toast_in` on
+/// [`saola_theme::motion::ease_out`]'s curve (§5 specifies `ease-out` for the
+/// entrance, and the theme's own `toast_alpha_over` eases the fade it plays
+/// alongside, so the two share one curve).
+///
 /// See this module's doc comment for why a spacer, and why 100% rather than
 /// §5's literal 120%.
 pub fn slide_offset(theme: &Theme, elapsed: Duration) -> f32 {
-    let travelled = saola_theme::motion::fraction(elapsed, theme.motion.toast_in);
+    let travelled = saola_theme::motion::ease_out(saola_theme::motion::fraction(
+        elapsed,
+        theme.motion.toast_in,
+    ));
     theme.sizes.notification_card_width * (1.0 - travelled)
 }
 
@@ -208,7 +227,8 @@ pub fn card_height(theme: &Theme, notification: &Notification) -> f32 {
     let content = text_block.max(theme.sizes.icon_tile);
 
     // Stage 6 ("Actions"): one extra row, `sizes.hit_target_bar` tall (the
-    // same fixed height `action_pill` below declares its buttons at), a
+    // same fixed height `saola_theme::widget::pill_button_faded` declares
+    // its buttons at — see `pills_row` below), a
     // `sizes.gap_tight` below the icon/text row — only when this
     // notification actually has a pill to show (the `"default"` action
     // never renders one; see `store::action_pills`). Zero-height when there
@@ -242,7 +262,10 @@ pub fn stack_height(theme: &Theme, toasts: &[ToastEntry]) -> u32 {
 // The module: state, messages, update, view, subscription.
 // ---------------------------------------------------------------------
 
-/// How often the stack redraws while at least one card is on screen.
+/// How often the stack redraws while at least one card is on screen:
+/// `motion.frame`, the theme's shared redraw cadence (32 ms — ~30 redraws a
+/// second, which reads as smooth for a rule that takes five seconds to
+/// drain).
 ///
 /// AGENTS.md's "every module maps to a signal, never a poll" has exactly one
 /// documented exception, and this is it: §5's motion cannot be expressed as
@@ -251,13 +274,14 @@ pub fn stack_height(theme: &Theme, toasts: &[ToastEntry]) -> u32 {
 /// than a poll — [`Toasts::subscription`] returns `Subscription::none()`
 /// whenever the stack is empty, which is almost all of a desktop's day.
 ///
-/// `saola-theme` has no frame-cadence token to take this from (its `motion.*`
-/// tokens are all design durations, not redraw intervals), so the value is
-/// local; the gap is recorded in `docs/UPSTREAM-THEME-DEBT.md`. 32 ms is
-/// saola-capture's own interim toast cadence, carried over unchanged — ~30
-/// redraws a second, which reads as smooth for a rule that takes five
-/// seconds to drain.
-const REDRAW_INTERVAL: Duration = Duration::from_millis(32);
+/// This used to be a local `const` (saola-capture's own interim cadence,
+/// carried over) because no token carried a *frame* interval — every
+/// `motion.*` value was a design duration. `saola-theme-v0.14.0` added
+/// `motion.frame` for exactly this, so every animated Saola surface now
+/// shares one cadence; see `docs/UPSTREAM-THEME-DEBT.md`'s "Closed" section.
+pub fn redraw_interval(theme: &Theme) -> Duration {
+    Duration::from_millis(u64::from(theme.motion.frame))
+}
 
 /// The toast stack's own message type, nested into `main.rs`'s outer
 /// `Message` as `Message::Toast(..)`.
@@ -269,7 +293,7 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(32);
 /// `&'a str`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
-    /// One [`REDRAW_INTERVAL`] elapsed. Carries no timestamp: `main.rs`
+    /// One [`redraw_interval`] elapsed. Carries no timestamp: `main.rs`
     /// passes the `now` it read alongside the message, the same
     /// "Tick wakes the update, it doesn't carry the clock" shape
     /// saola-capture's toast and flash modules use.
@@ -468,14 +492,27 @@ impl Toasts {
         stack.into()
     }
 
-    /// Ticks only while a card is on screen — see [`REDRAW_INTERVAL`] for
+    /// Ticks only while a card is on screen — see [`redraw_interval`] for
     /// why this subscription exists at all and why the gate is the whole
     /// point of it.
-    pub fn subscription(&self, store: &Store) -> Subscription<Message> {
+    ///
+    /// # Why this one takes the theme (teaching note)
+    ///
+    /// AGENTS.md's module pattern writes a subscription as
+    /// `fn subscription(&self)`, and this crate already documents (see
+    /// `modules/mod.rs`) that its modules are surfaces over one shared
+    /// model, so they take that model as a parameter rather than owning it.
+    /// The cadence is now a *token* (`motion.frame`), which lives in the
+    /// theme, and the theme reaches every other function in this module the
+    /// same way — as the first parameter, exactly as `view` takes it. So the
+    /// theme is threaded in here too rather than stored on [`Toasts`]: a
+    /// module that keeps its own copy of the theme is a module that can hold
+    /// a stale one, and `main.rs` already owns the single `Theme` value.
+    pub fn subscription(&self, theme: &Theme, store: &Store) -> Subscription<Message> {
         if store.toasts().is_empty() {
             Subscription::none()
         } else {
-            iced::time::every(REDRAW_INTERVAL).map(|_instant| Message::Tick)
+            iced::time::every(redraw_interval(theme)).map(|_instant| Message::Tick)
         }
     }
 }
@@ -584,14 +621,17 @@ pub fn card_view<'a>(
         .clip(true);
 
     // §6's urgent variant (concept 10b): "a terracotta ring and no life
-    // rule". `saola_theme::style::container::card_urgent` is *not* the
-    // helper for it here — that one is `card` plus the ring, and `card`'s
+    // rule". `saola_theme::style::container::card_urgent` is still *not* the
+    // helper for it — that one is `card` plus the ring, and `card`'s
     // `Surface::Ink` arm paints an **ivory** card, where §6's notification
-    // card is solid ink; it also takes no `alpha`, so it could not fade.
-    // Composed from the two right pieces instead, both from the theme, and
-    // recorded in `docs/UPSTREAM-THEME-DEBT.md`.
+    // card is solid ink. `notification_card_urgent` is the ink twin, added
+    // in `saola-theme-v0.14.0` and taking the card's own `alpha`; this file
+    // used to compose it by hand from `notification_card` + `accent_ring`.
     if notification.urgency == Urgency::Critical {
-        card.style(urgent_card_style(theme, alpha)).into()
+        card.style(saola_theme::style::container::notification_card_urgent(
+            theme, alpha,
+        ))
+        .into()
     } else {
         card.style(saola_theme::style::container::notification_card(
             theme, alpha,
@@ -627,7 +667,7 @@ fn icon_tile<'a>(theme: &Theme, notification: &Notification, alpha: f32) -> Elem
         .height(Length::Fixed(size))
         .align_x(Center)
         .align_y(Center)
-        .style(tile_style(theme, alpha))
+        .style(saola_theme::style::notification::icon_tile(theme, alpha))
         .clip(true)
         .into()
 }
@@ -641,43 +681,9 @@ fn life_rule<'a>(theme: &Theme, life: Option<f32>, alpha: f32) -> Element<'a, Me
         Some(remaining) => progress_bar(0.0..=1.0, remaining)
             .length(Length::Fill)
             .girth(Length::Fixed(girth))
-            .style(life_rule_style(theme, alpha))
+            .style(saola_theme::style::notification::life_rule(theme, alpha))
             .into(),
         None => Space::new().height(Length::Fixed(girth)).into(),
-    }
-}
-
-/// [`saola_theme::style::notification::icon_tile`]'s recipe with the card's
-/// fade applied. The theme's own helper takes no `alpha` — see this file's
-/// urgent-card comment and `docs/UPSTREAM-THEME-DEBT.md`; every value here
-/// is still a token, nothing is invented.
-fn tile_style(
-    theme: &Theme,
-    alpha: f32,
-) -> impl Fn(&iced::Theme) -> container::Style + Clone + use<> {
-    let background = theme.on_ink.fill_subtle.with_opacity(alpha);
-    let text_color = theme.on_ink.primary.with_opacity(alpha);
-    let border = saola_theme::style::border_none(theme.radii.tile);
-    move |_| container::Style {
-        text_color: Some(text_color),
-        background: Some(iced::Background::Color(background)),
-        border,
-        ..container::Style::default()
-    }
-}
-
-/// [`saola_theme::style::notification::life_rule`]'s recipe with the card's
-/// fade applied — same gap, same posture, as [`tile_style`].
-fn life_rule_style(
-    theme: &Theme,
-    alpha: f32,
-) -> impl Fn(&iced::Theme) -> progress_bar::Style + Clone + use<> {
-    let track = theme.on_ink.fill_subtle.with_opacity(alpha);
-    let accent = theme.palette.accent.with_opacity(alpha);
-    move |_| progress_bar::Style {
-        background: iced::Background::Color(track),
-        bar: iced::Background::Color(accent),
-        border: saola_theme::style::border_none(0.0),
     }
 }
 
@@ -696,84 +702,27 @@ fn pills_row<'a>(
 
     let mut r = row![].spacing(theme.sizes.pill_gap);
     for action in pills {
-        r = r.push(action_pill(
+        // `emphasized: false` is the "Secondary" pill variant — the solid
+        // ivory pill with an ink label that §6's "optional ivory action
+        // pills" describe (`style::button::emphasis_faded` at
+        // `emphasized = false` *is* `rest_faded`'s recipe; the emphasized
+        // arm is the terracotta one, which a toast never wants). `alpha` is
+        // the card's own fade: iced 0.14 has no subtree opacity, so the
+        // pill has to be told. Before `saola-theme-v0.14.0` this was
+        // `widget::pill_button`'s geometry rebuilt by hand around a
+        // post-scaled `style::button::rest`, because neither took an
+        // `alpha`.
+        r = r.push(saola_theme::widget::pill_button_faded(
             theme,
-            alpha,
+            Surface::Ink,
+            Chrome::Shell,
             &action.label,
-            notification.id,
-            &action.key,
+            Some(Message::ActionClicked(notification.id, action.key.clone())),
+            false,
+            alpha,
         ));
     }
     Some(r.into())
-}
-
-/// One action pill — [`saola_theme::widget::pill_button`]'s exact geometry
-/// (`sizes.hit_target_bar` height, `paddings.pill_button`'s horizontal
-/// padding, [`saola_theme::convert::ui_font`] at `typography.size.body`,
-/// content vertically centered via [`saola_theme::widget::centered`]) built
-/// by hand rather than called directly, because that helper's style takes
-/// no `alpha` — see [`action_pill_style`].
-fn action_pill<'a>(
-    theme: &Theme,
-    alpha: f32,
-    label: &'a str,
-    id: u32,
-    key: &str,
-) -> Element<'a, Message> {
-    let content = saola_theme::widget::centered(
-        text(label)
-            .font(saola_theme::convert::ui_font(theme))
-            .size(theme.typography.size.body),
-    );
-    button(content)
-        .height(Length::Fixed(theme.sizes.hit_target_bar))
-        .padding([0.0, theme.paddings.pill_button[1]])
-        .style(action_pill_style(theme, alpha))
-        .on_press(Message::ActionClicked(id, key.to_string()))
-        .into()
-}
-
-/// [`saola_theme::style::button::rest`] at `(Surface::Ink, Chrome::Shell)` —
-/// the solid-ivory-pill/ink-label recipe style guide §6's "Secondary" pill
-/// variant and its own "ivory action pills" both describe — with the card's
-/// own fade applied on top, the same way [`tile_style`]/[`life_rule_style`]
-/// carry `alpha` for a theme helper that doesn't take one.
-///
-/// **Theme gap** (`docs/UPSTREAM-THEME-DEBT.md`): `style::button::rest` /
-/// `emphasis` / `widget::pill_button` have no `alpha` parameter, so a pill
-/// can't fade in step with the rest of a toast card (iced 0.14 has no
-/// subtree opacity — see this module's doc comment). Every color below is
-/// still a token, scaled after the fact rather than invented.
-fn action_pill_style(
-    theme: &Theme,
-    alpha: f32,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style + Clone + use<> {
-    let base = saola_theme::style::button::rest(theme, Surface::Ink, Chrome::Shell);
-    let alpha = alpha.clamp(0.0, 1.0);
-    move |t, status| {
-        let mut style = base(t, status);
-        if let Some(iced::Background::Color(ref mut color)) = style.background {
-            color.a *= alpha;
-        }
-        style.text_color.a *= alpha;
-        style
-    }
-}
-
-/// [`saola_theme::style::container::notification_card`] plus
-/// [`saola_theme::style::accent_ring`] — §6's ink card wearing concept 10b's
-/// terracotta ring, at the card's current alpha.
-fn urgent_card_style(
-    theme: &Theme,
-    alpha: f32,
-) -> impl Fn(&iced::Theme) -> container::Style + Clone + use<> {
-    let base = saola_theme::style::container::notification_card(theme, alpha);
-    let mut ring = saola_theme::style::accent_ring(theme, theme.radii.card);
-    ring.color.a *= alpha.clamp(0.0, 1.0);
-    move |t| container::Style {
-        border: ring,
-        ..base(t)
-    }
 }
 
 #[cfg(test)]
@@ -861,9 +810,14 @@ mod tests {
 
     // -- card_alpha ---------------------------------------------------------
 
-    /// The local generalization must agree with saola-theme's own §5
-    /// encoding wherever the theme can express the same thing. If this ever
-    /// fails, the toast has drifted off the style guide.
+    /// [`card_alpha`] must agree with saola-theme's own §5 encoding
+    /// wherever the theme can express the same thing. Since
+    /// `saola-theme-v0.14.0` this holds by construction — `card_alpha`
+    /// *calls* `toast_alpha_over`, which the theme itself proves equals
+    /// `toast_alpha` at the default span — so it is kept as a regression
+    /// guard on the adapter: it fails if this crate ever stops feeding the
+    /// theme the rest span the policy resolved (see
+    /// [`the_rest_span_policy_is_what_reaches_the_themes_envelope`]).
     #[test]
     fn card_alpha_matches_the_theme_for_a_default_rest_span() {
         let t = theme();
@@ -917,6 +871,32 @@ mod tests {
     }
 
     // -- life_fraction ------------------------------------------------------
+
+    /// The rest span a notification's own `expire_timeout` resolves to is
+    /// what reaches the theme's envelope — the one thing the adapter
+    /// functions can get wrong now that the arithmetic is upstream. A
+    /// two-second `expire_timeout` must produce the theme's answers *for a
+    /// two-second rest span*, not for `motion.toast_idle`.
+    #[test]
+    fn the_rest_span_policy_is_what_reaches_the_themes_envelope() {
+        let t = theme();
+        let policy = rest_policy(&t, &notification(1, Urgency::Normal, 2000));
+        assert_eq!(policy, ExpiryPolicy::After(ms(2000)));
+
+        for millis in [0, 175, 350, 1000, 2349, 2350, 2900, 3350, 9000] {
+            let elapsed = ms(millis);
+            assert_eq!(
+                card_alpha(&t, policy, elapsed),
+                saola_theme::motion::toast_alpha_over(&t, 2000, elapsed),
+                "the card's fade ignored the notification's own rest span at {millis} ms"
+            );
+            assert_eq!(
+                life_fraction(&t, policy, elapsed),
+                Some(saola_theme::motion::life_fraction_over(&t, 2000, elapsed)),
+                "the life rule ignored the notification's own rest span at {millis} ms"
+            );
+        }
+    }
 
     #[test]
     fn life_fraction_matches_the_theme_for_a_default_rest_span() {
@@ -978,6 +958,33 @@ mod tests {
         assert!(
             quarter > half && half > 0.0,
             "travel is monotonic: {quarter} then {half}"
+        );
+    }
+
+    /// §5 specifies `ease-out` for the entrance: the card covers more than
+    /// half its travel in the first half of `motion.toast_in`, so what is
+    /// *left* at the midpoint is less than half a card width. A linear
+    /// slide — what this function did before `saola-theme-v0.14.0` shipped
+    /// `motion::ease_out` — would leave exactly half.
+    #[test]
+    fn the_slide_eases_out_rather_than_travelling_linearly() {
+        let t = theme();
+        let half_way = slide_offset(&t, ms(u64::from(t.motion.toast_in) / 2));
+        let linear = t.sizes.notification_card_width / 2.0;
+
+        assert!(
+            half_way < linear,
+            "an eased entrance is past halfway at the halfway point: {half_way} >= {linear}"
+        );
+        assert_eq!(
+            half_way,
+            t.sizes.notification_card_width
+                * (1.0
+                    - saola_theme::motion::ease_out(saola_theme::motion::fraction(
+                        ms(u64::from(t.motion.toast_in) / 2),
+                        t.motion.toast_in
+                    ))),
+            "the slide rides the theme's own curve, not a local one"
         );
     }
 

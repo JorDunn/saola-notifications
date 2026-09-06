@@ -269,6 +269,9 @@ Short, and only where it carries meaning.
 | Session status breath | `2.4s ease-in-out` loop, opacity `0.45 → 1 → 0.45` |
 | Window-title marquee (opt-in, off by default) | `24px/s linear` sweep, `2s` dwell at each end — see below |
 
+An animated surface redraws on `motion.frame` (32ms). Use this cadence for every
+animated shell surface. Do not pick a new redraw interval per surface.
+
 ### The session status breath
 
 The only looping animation in the shell proper. A `status-working` or `status-subagents`
@@ -364,8 +367,8 @@ and lightened metadata (`rgba(255,255,240,.75)`).
 ### Popover
 
 Opaque ink, `30px` radius, `box-shadow: 0 18px 48px rgba(12,10,0,.5)`, 20–22px padding.
-Anchored 72px from the screen top, 26px from the relevant edge. **Only one popover open
-at a time** — opening one closes the others.
+Anchored 72px from the screen top, 26px from the relevant edge (`sizes.shell_edge_gap`).
+**Only one popover open at a time** — opening one closes the others.
 
 Popovers grow **downward** from their trigger when the trigger is near the top of the
 screen, and must never overlap the control that opened them.
@@ -381,9 +384,17 @@ from an app already on screen replaces its card and resets the clock.
 
 ### Notification centre
 
-460px, anchored 72px from the top and 26px from the right, `max-height: calc(100% - 98px)`
-with the list scrolling. **It hugs its content and only reaches full height when there is
-enough to show.** Grouped by application, each group collapsible, with a count chip.
+460px, anchored 72px from the top and 26px from the right (`sizes.shell_edge_gap`),
+`max-height: calc(100% - 98px)` with the list scrolling. **It hugs its content and only
+reaches full height when there is enough to show.** Grouped by application, each group
+collapsible, with a count chip.
+
+The canonical vertical rhythm uses three tokens. `sizes.notification_centre_padding`
+sets the outer padding. `sizes.notification_centre_group_gap` sets the gap between app
+groups. `sizes.notification_centre_row` sets the height of one card or entry row. A
+second consumer of this shape — a panel indicator popover, or a settings preview —
+should use the same three tokens. This keeps the two surfaces in step. The header row
+holds the title and the do-not-disturb toggle. It is `sizes.hit_target_bar` tall.
 
 ---
 
@@ -398,7 +409,7 @@ enough to show.** Grouped by application, each group collapsible, with a count c
 | Notification centre | Ink, right | Grouped, collapsible, DND toggle, media footer. |
 | Quick settings | Ink, right | Power profile selector, battery and Wi-Fi readouts, volume slider, media. Buttons: terracotta fill when active/selected, ivory at rest, per §1's one rule. |
 | Lock | Wallpaper | Clock, date, temperature centred, nothing else. Click reveals avatar → name → password. |
-| Greeter | Wallpaper | Identical to lock plus a user list and a session list as ivory pills below the field. |
+| Greeter | Wallpaper | Lock minus temperature, plus user tiles below the field (`selection_tile` + `avatar_lock`; a "Not listed?" tile is always present), and a top-right battery readout + power cluster (shutdown/reboot/suspend as bare icons, one shared label, two-step confirm). Session pills only when configured, and only when more than one session is installed. |
 | Power menu | Ink, centred | Bare icons, one shared label. |
 | Boot menu | Ink (optionally wallpaper at 78%) | Bare icons and text, terracotta on the active entry, progress rule as the countdown. |
 | Boot / shutdown splash | Ink | Mark and one indeterminate rule. Shutdown drops terracotta entirely. |

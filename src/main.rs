@@ -160,7 +160,7 @@ enum SurfaceRole {
 ///
 /// Style guide §6 caps the centre at `calc(100% - 98px)` — the output's
 /// height, less `sizes.popover_top` (72) above it and
-/// `sizes.panel_margin_islands` (26) below. `iced_layershell` 0.19 gives an
+/// `sizes.shell_edge_gap` (26) below. `iced_layershell` 0.19 gives an
 /// application no way to *ask* how tall the output is: there is no output
 /// event, and the size a surface reports back is the size it was given.
 ///
@@ -200,7 +200,7 @@ enum CentreClamp {
     Unknown,
     /// The compositor stretched a [`CentreMode::Measure`] surface to this
     /// many logical pixels: `output_height − sizes.popover_top −
-    /// sizes.panel_margin_islands`, which is §6's clamp exactly.
+    /// sizes.shell_edge_gap`, which is §6's clamp exactly.
     Measured(u32),
     /// The measuring surface came back with a useless height (zero), so this
     /// compositor will not answer the question. The centre falls back to its
@@ -217,10 +217,11 @@ enum CentreClamp {
 /// Geometry is §6's, taken from tokens: `sizes.notification_card_width`
 /// wide, `sizes.popover_top` below the screen top (the same offset
 /// saola-panel's popovers use, so a toast never collides with the panel) and
-/// `sizes.panel_margin_islands` in from the right edge — 26 px, §6's "26px
-/// from the relevant edge", via the one token that carries that number as a
-/// screen-edge inset (there is no dedicated `popover_right`; recorded in
-/// `docs/UPSTREAM-THEME-DEBT.md`).
+/// `sizes.shell_edge_gap` in from the right edge — 26 px, §6's "26px from
+/// the relevant edge". That token is the theme's own name for this inset as
+/// of `saola-theme-v0.14.0`; this file used to borrow
+/// `sizes.panel_margin_islands` (the panel's islands margin, the same
+/// number under a name about none of these surfaces).
 ///
 /// `exclusive_zone: 0` reserves nothing but still lets the compositor keep
 /// the surface clear of anyone else's reserved strip.
@@ -235,7 +236,7 @@ fn toast_surface_settings(theme: &Theme, height: u32) -> NewLayerShellSettings {
         size: Some((theme.sizes.notification_card_width.round() as u32, height)),
         margin: Some((
             theme.sizes.popover_top.round() as i32,
-            theme.sizes.panel_margin_islands.round() as i32,
+            theme.sizes.shell_edge_gap.round() as i32,
             0,
             0,
         )),
@@ -254,9 +255,8 @@ fn toast_surface_settings(theme: &Theme, height: u32) -> NewLayerShellSettings {
 ///
 /// Geometry is §6's "Notification centre", every number a token:
 /// `sizes.notification_centre_width` (460) wide, `sizes.popover_top` (72)
-/// below the screen top, `sizes.panel_margin_islands` (26) in from the right
-/// edge — the same borrowed screen-edge inset the toast surface uses, and the
-/// same entry in `docs/UPSTREAM-THEME-DEBT.md`.
+/// below the screen top, `sizes.shell_edge_gap` (26) in from the right
+/// edge — the same screen-edge inset the toast surface uses.
 ///
 /// `KeyboardInteractivity::OnDemand` is binding for the `Hug` surface
 /// (AGENTS.md / PLAN.md Stage 7): the centre may take the keyboard when the
@@ -268,7 +268,7 @@ fn toast_surface_settings(theme: &Theme, height: u32) -> NewLayerShellSettings {
 fn centre_surface_settings(theme: &Theme, mode: CentreMode) -> NewLayerShellSettings {
     let width = theme.sizes.notification_centre_width.round() as u32;
     let top = theme.sizes.popover_top.round() as i32;
-    let edge = theme.sizes.panel_margin_islands.round() as i32;
+    let edge = theme.sizes.shell_edge_gap.round() as i32;
     // Named so `niri msg layers` can tell this surface from the toast stack
     // during a live check.
     let namespace = Some("saola-notifications-centre".to_string());
@@ -864,7 +864,9 @@ impl Daemon {
         Subscription::batch([
             Subscription::run(dbus_worker_stream),
             modules::capture_bridge::subscription().map(Message::CaptureBridge),
-            self.toasts.subscription(&self.store).map(Message::Toast),
+            self.toasts
+                .subscription(&self.theme, &self.store)
+                .map(Message::Toast),
             self.centre.subscription().map(Message::Centre),
             surface_size,
             config,
@@ -1064,7 +1066,7 @@ impl Daemon {
             tracing::info!(
                 clamp = height,
                 popover_top = self.theme.sizes.popover_top,
-                screen_edge = self.theme.sizes.panel_margin_islands,
+                screen_edge = self.theme.sizes.shell_edge_gap,
                 "saola-notifications: the compositor measured the notification centre's maximum \
                  height (style guide §6's `100% - 98px`)"
             );
@@ -1894,7 +1896,7 @@ mod tests {
             top + bottom,
             98,
             "§6: `max-height: calc(100% - 98px)` = sizes.popover_top (72) + \
-             sizes.panel_margin_islands (26)"
+             sizes.shell_edge_gap (26)"
         );
     }
 

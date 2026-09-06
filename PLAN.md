@@ -160,7 +160,11 @@ newest siblings, /home/jordan/Developer/saola-files and
    the `image` crate is additionally needed for png decode of
    image-path/capture thumbnails), `iced_layershell 0.19`,
    `saola-theme = { git = "https://github.com/JorDunn/saola-theme",
-   tag = "saola-theme-v0.13.0", version = "0.13.0" }`, `zbus 5`
+   tag = "saola-theme-v0.13.0", version = "0.13.0" }` (**note, 2026-09-06:
+   Stage 11-era work moved this pin to `saola-theme-v0.14.0` / `0.14.0`
+   when that tag closed the nine recorded theme gaps — see
+   `docs/UPSTREAM-THEME-DEBT.md`. Stage 1's own text stands as written**),
+   `zbus 5`
    (default-features = false, features tokio), `toml`, `tracing`,
    `tracing-subscriber`, `futures` (match sibling versions).
 9. **src/main.rs**: a stub that initializes tracing and exits cleanly —

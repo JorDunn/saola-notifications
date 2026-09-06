@@ -22,7 +22,7 @@
 //!
 //! §6 caps the centre at `calc(100% - 98px)`, and 98 is not a number this
 //! file invents: it is `sizes.popover_top` (72, the offset from the screen
-//! top) plus `sizes.panel_margin_islands` (26, §6's "26px from the relevant
+//! top) plus `sizes.shell_edge_gap` (26, §6's "26px from the relevant
 //! edge"), the same two tokens the surface's own margins are built from. What
 //! this module cannot know is the `100%` — the output's height — because
 //! `iced_layershell` 0.19 exposes no output geometry to an application.
@@ -101,15 +101,16 @@ pub fn group_history(store: &Store) -> Vec<Group<'_>> {
 // Surface geometry — pure, and called before any surface exists.
 // ---------------------------------------------------------------------
 
-/// One group's block height: its header row, plus (when the group is
-/// expanded) every card and the `sizes.gap_tight` that separates each card
-/// from what is above it.
+/// One group's block height: its header row (`sizes.notification_centre_row`
+/// — §6's "the height of one card or entry row" for this surface), plus (when
+/// the group is expanded) every card and the `sizes.gap_tight` that separates
+/// each card from what is above it.
 ///
 /// A collapsed group is exactly its header — that is the whole point of
 /// collapsing it, and it is what lets a user shrink an overflowing centre
 /// back under the clamp.
 pub fn group_height(theme: &Theme, group: &Group<'_>) -> f32 {
-    let header = theme.sizes.list_row;
+    let header = theme.sizes.notification_centre_row;
     if group.collapsed {
         return header;
     }
@@ -125,17 +126,35 @@ pub fn group_height(theme: &Theme, group: &Group<'_>) -> f32 {
 /// before any clamp. §6: "It hugs its content and only reaches full height
 /// when there is enough to show."
 ///
-/// The three fixed pieces (`chrome` below) are the popover's own vertical
-/// padding, the title/do-not-disturb row, and the gap under it. An empty
-/// centre adds one list row for the empty-state line and no clear-all row —
+/// The three fixed pieces (`chrome` below) are the centre's own vertical
+/// padding (`sizes.notification_centre_padding`, twice), the
+/// title/do-not-disturb header row (`sizes.hit_target_bar` — §6 states that
+/// height for this row specifically, and it is what
+/// [`header_row`] declares), and the gap under it
+/// (`sizes.notification_centre_group_gap`). An empty centre adds one
+/// `sizes.list_row` for the empty-state line — that is the height
+/// [`saola_theme::widget::empty_state_row`] itself declares, so the budget
+/// names the same token the widget does — and no clear-all row, because
 /// there is nothing to clear. A non-empty one adds the group blocks, the
-/// gaps between them, and the clear-all row with its own gap above it.
+/// group gaps between them, and the clear-all row with its own gap above it.
+///
+/// # The three centre tokens (teaching note)
+///
+/// `saola-theme-v0.14.0` added `sizes.notification_centre_{padding,
+/// group_gap,row}` so that a second consumer of this shape — §6 names a
+/// panel indicator popover and a settings preview — cannot reinvent the
+/// rhythm differently. This function used to assemble it from the generic
+/// `popover_padding` / `island_gap` / `list_row`, which carry the same
+/// numbers; naming the centre's own tokens is what keeps the two surfaces
+/// tied together if those numbers ever move apart.
 ///
 /// Every term is a token. Nothing here is measured text: a layer-shell
 /// surface is sized before iced lays anything out, which is also why
 /// [`toast::card_height`] budgets a fixed two-line body (see its own note).
 pub fn centre_height(theme: &Theme, groups: &[Group<'_>]) -> f32 {
-    let chrome = theme.sizes.popover_padding * 2.0 + theme.sizes.list_row + theme.sizes.island_gap;
+    let chrome = theme.sizes.notification_centre_padding * 2.0
+        + theme.sizes.hit_target_bar
+        + theme.sizes.notification_centre_group_gap;
 
     if groups.is_empty() {
         return chrome + theme.sizes.list_row;
@@ -145,9 +164,9 @@ pub fn centre_height(theme: &Theme, groups: &[Group<'_>]) -> f32 {
         .iter()
         .map(|group| group_height(theme, group))
         .sum::<f32>()
-        + (groups.len() - 1) as f32 * theme.sizes.island_gap;
+        + (groups.len() - 1) as f32 * theme.sizes.notification_centre_group_gap;
 
-    chrome + blocks + theme.sizes.island_gap + theme.sizes.hit_target_bar
+    chrome + blocks + theme.sizes.notification_centre_group_gap + theme.sizes.hit_target_bar
 }
 
 /// The centre surface's declared height in logical pixels: [`centre_height`]
@@ -365,11 +384,14 @@ impl Centre {
     ///
     /// The surface is `sizes.notification_centre_width` (460) wide and a card
     /// is `sizes.notification_card_width` (440) — a difference of exactly two
-    /// `sizes.island_gap`s. So the popover's own horizontal padding is
+    /// `sizes.island_gap`s. So the centre's own *horizontal* padding is
     /// `island_gap`, which makes the card list land at its natural width with
     /// nothing to clip, and the text rows above and below take a second
-    /// `island_gap` of their own to sit at `sizes.popover_padding` (20) from
-    /// the surface edge, where §6 puts a popover's text.
+    /// `island_gap` of their own to sit at
+    /// `sizes.notification_centre_padding` (20) from the surface edge, where
+    /// §6 puts this surface's text. The *vertical* padding is that centre
+    /// token directly — the horizontal one is derived from the two widths
+    /// and cannot be, which is why the two axes name different tokens.
     pub fn view<'a>(
         &self,
         theme: &Theme,
@@ -379,20 +401,23 @@ impl Centre {
         let groups = group_history(store);
 
         let mut stack = column![header_row(theme, dnd_manual)]
-            .spacing(theme.sizes.island_gap)
+            .spacing(theme.sizes.notification_centre_group_gap)
             .height(Length::Fill);
 
         if groups.is_empty() {
-            stack = stack.push(
-                container(saola_theme::widget::empty_state(
-                    theme,
-                    Surface::Ink,
-                    "No notifications",
-                ))
-                .height(Length::Fixed(theme.sizes.list_row)),
-            );
+            // `empty_state_row`, not `empty_state`: the latter is Fill × Fill
+            // and this surface has no Fill to give (its height is declared
+            // before iced measures anything — see this module's doc comment),
+            // so it used to be wrapped in a fixed-height container by hand.
+            // The row variant declares `sizes.list_row` itself, which is
+            // exactly what `centre_height` budgets for it.
+            stack = stack.push(saola_theme::widget::empty_state_row(
+                theme,
+                Surface::Ink,
+                "No notifications",
+            ));
         } else {
-            let mut list = column![].spacing(theme.sizes.island_gap);
+            let mut list = column![].spacing(theme.sizes.notification_centre_group_gap);
             for group in &groups {
                 list = list.push(group_block(theme, group));
             }
@@ -411,7 +436,10 @@ impl Centre {
         container(stack)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding([theme.sizes.popover_padding, theme.sizes.island_gap])
+            .padding([
+                theme.sizes.notification_centre_padding,
+                theme.sizes.island_gap,
+            ])
             .style(saola_theme::style::container::popover(theme))
             .into()
     }
@@ -442,7 +470,16 @@ impl Centre {
 }
 
 /// The title row: §6's section label on the left, the do-not-disturb toggle
-/// on the right, in one `sizes.list_row`-tall band.
+/// on the right, in one `sizes.hit_target_bar`-tall band.
+///
+/// §6 (as of the `saola-theme-v0.14.0` style guide) states that height for
+/// this row by name: "The header row holds the title and the do-not-disturb
+/// toggle. It is `sizes.hit_target_bar` tall." It used to be
+/// [`saola_theme::widget::list_row_container`]'s `sizes.list_row` (38) —
+/// two pixels shorter — which is why this builds its own band rather than
+/// borrowing that helper: `list_row_container` hardwires `list_row`, as it
+/// should, and this row is not a list row. [`centre_height`] budgets the
+/// same token.
 fn header_row<'a>(theme: &Theme, dnd_manual: bool) -> Element<'a, Message> {
     let toggle = row![
         saola_theme::widget::text::body(theme, Surface::Ink, "Do not disturb"),
@@ -460,7 +497,9 @@ fn header_row<'a>(theme: &Theme, dnd_manual: bool) -> Element<'a, Message> {
     ]
     .align_y(iced::Center);
 
-    container(saola_theme::widget::list_row_container(theme, content))
+    container(content)
+        .height(Length::Fixed(theme.sizes.hit_target_bar))
+        .align_y(iced::Center)
         .padding([0.0, theme.sizes.island_gap])
         .into()
 }
@@ -636,35 +675,45 @@ mod tests {
     // centre_height
     // ------------------------------------------------------------------
 
+    /// Chrome (`notification_centre_padding` ×2 + `hit_target_bar` for the
+    /// header row + `notification_centre_group_gap` under it) plus one
+    /// `list_row` — the height `widget::empty_state_row` declares for
+    /// itself.
     #[test]
     fn an_empty_centre_is_its_chrome_plus_one_empty_state_row() {
         let theme = theme();
-        let expected = theme.sizes.popover_padding * 2.0
-            + theme.sizes.list_row
-            + theme.sizes.island_gap
+        let expected = theme.sizes.notification_centre_padding * 2.0
+            + theme.sizes.hit_target_bar
+            + theme.sizes.notification_centre_group_gap
             + theme.sizes.list_row;
 
         assert_eq!(centre_height(&theme, &[]), expected);
     }
 
+    /// One group replaces the empty-state row with a
+    /// `notification_centre_row` group header, its `gap_tight`-separated
+    /// card, and the clear-all row (`hit_target_bar`) under one more
+    /// `notification_centre_group_gap`.
     #[test]
     fn one_group_of_one_adds_its_header_its_card_and_the_clear_all_row() {
         let theme = theme();
         let store = store_with(&[(1, "slack")]);
         let groups = group_history(&store);
 
-        let empty_chrome =
-            theme.sizes.popover_padding * 2.0 + theme.sizes.list_row + theme.sizes.island_gap;
+        let empty_chrome = theme.sizes.notification_centre_padding * 2.0
+            + theme.sizes.hit_target_bar
+            + theme.sizes.notification_centre_group_gap;
         let expected = empty_chrome
-            + theme.sizes.list_row
+            + theme.sizes.notification_centre_row
             + theme.sizes.gap_tight
             + toast::card_height(&theme, groups[0].notifications[0])
-            + theme.sizes.island_gap
+            + theme.sizes.notification_centre_group_gap
             + theme.sizes.hit_target_bar;
 
         assert_eq!(centre_height(&theme, &groups), expected);
     }
 
+    /// The gap between two app groups is `notification_centre_group_gap`.
     #[test]
     fn a_second_group_adds_its_own_block_and_one_gap() {
         let theme = theme();
@@ -677,7 +726,7 @@ mod tests {
         let block = group_height(&theme, &two_groups[0]);
         assert_eq!(
             centre_height(&theme, &two_groups) - centre_height(&theme, &one_group),
-            block + theme.sizes.island_gap
+            block + theme.sizes.notification_centre_group_gap
         );
     }
 
@@ -699,6 +748,10 @@ mod tests {
         assert!(collapsed < expanded);
     }
 
+    /// Two collapsed groups: the chrome, two bare
+    /// `notification_centre_row` headers with one
+    /// `notification_centre_group_gap` between them, then a second such gap
+    /// and the `hit_target_bar` clear-all row.
     #[test]
     fn every_group_collapsed_is_the_shortest_a_non_empty_centre_gets() {
         let theme = theme();
@@ -707,15 +760,38 @@ mod tests {
         store.toggle_collapsed("mail");
 
         let groups = group_history(&store);
-        let expected = theme.sizes.popover_padding * 2.0
-            + theme.sizes.list_row
-            + theme.sizes.island_gap
-            + theme.sizes.list_row * 2.0
-            + theme.sizes.island_gap
-            + theme.sizes.island_gap
+        let expected = theme.sizes.notification_centre_padding * 2.0
+            + theme.sizes.hit_target_bar
+            + theme.sizes.notification_centre_group_gap
+            + theme.sizes.notification_centre_row * 2.0
+            + theme.sizes.notification_centre_group_gap
+            + theme.sizes.notification_centre_group_gap
             + theme.sizes.hit_target_bar;
 
         assert_eq!(centre_height(&theme, &groups), expected);
+    }
+
+    /// §6: "The header row holds the title and the do-not-disturb toggle.
+    /// It is `sizes.hit_target_bar` tall." It is the only term of an empty
+    /// centre's chrome that is neither padding nor a gap nor the
+    /// empty-state row, so subtracting those three leaves exactly that
+    /// token. Before `saola-theme-v0.14.0`'s style guide said so, this row
+    /// was a `sizes.list_row` (38) — two pixels shorter.
+    #[test]
+    fn the_header_row_is_a_hit_target_bar_not_a_list_row() {
+        let theme = theme();
+        let everything_else = theme.sizes.notification_centre_padding * 2.0
+            + theme.sizes.notification_centre_group_gap
+            + theme.sizes.list_row;
+
+        assert_eq!(
+            centre_height(&theme, &[]) - everything_else,
+            theme.sizes.hit_target_bar
+        );
+        assert_ne!(
+            theme.sizes.hit_target_bar, theme.sizes.list_row,
+            "if these two tokens ever converge this test stops proving anything"
+        );
     }
 
     // ------------------------------------------------------------------

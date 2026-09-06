@@ -131,7 +131,26 @@ iced_layershell = "0.19"
 # sibling's current pin at `saola-theme-v0.5.0`, since this repo starts
 # after several theme releases landed). Never `branch = "main"` — see
 # AGENTS.md's Design language section.
-saola-theme = { git = "https://github.com/JorDunn/saola-theme", tag = "saola-theme-v0.13.0", version = "0.13.0" }
+#
+# Addendum — 2026-09-06 (Stage 11-era gap adoption). Moved to
+# `saola-theme-v0.14.0`, verified live the same way the original pin was:
+# `git tag --sort=-v:refname` in the saola-theme checkout lists
+# `saola-theme-v0.14.0`, and `git show
+# saola-theme-v0.14.0:crates/saola-theme/Cargo.toml` reports
+# `version = "0.14.0"` (on `saola-tokens 0.8.0`), matching below. This tag
+# closes **all nine** gaps `docs/UPSTREAM-THEME-DEBT.md` recorded against
+# v0.13.0: `style::container::notification_card_urgent(t, alpha)`,
+# `alpha` on `style::notification::{life_rule, icon_tile}`,
+# `motion::{toast_alpha_over, life_fraction_over}` (rest span as a
+# parameter), `sizes.shell_edge_gap`, `motion.frame`, `motion::ease_out`,
+# `style::button::{rest_faded, emphasis_faded}` +
+# `widget::pill_button_faded`, `widget::empty_state_row`, and the three
+# `sizes.notification_centre_{padding,group_gap,row}` tokens. Every local
+# workaround this crate carried for them is deleted in the same change —
+# see the debt file's "Closed" section for the per-gap call sites. The one
+# breaking change in the tag (`Avatar::resolve` gained a `max_bytes: u64`
+# parameter) touches nothing here: this crate never calls it.
+saola-theme = { git = "https://github.com/JorDunn/saola-theme", tag = "saola-theme-v0.14.0", version = "0.14.0" }
 # D-Bus. `default-features = false` drops zbus's default `async-io` runtime;
 # `tokio` makes it share the one runtime this crate ever spins up — iced's
 # `tokio` feature builds it, same teaching note as every sibling's

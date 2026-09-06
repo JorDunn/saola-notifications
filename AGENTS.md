@@ -13,7 +13,23 @@ helpers, and tokens.
 architecture, dependencies, or conventions updates this file in the same
 stage and says so in its handoff. A stale AGENTS.md is a bug.
 
-> Status: **v0.1 feature-complete, reviewed.** Stage 10 closed out v0.1:
+> Status: **v0.1 feature-complete, reviewed.**
+>
+> **2026-09-06 — the theme pin is `saola-theme-v0.14.0`.** That tag closes
+> all nine gaps `docs/UPSTREAM-THEME-DEBT.md` recorded against v0.13.0, and
+> every local workaround for them is deleted (see that file's "Closed"
+> section for the per-gap API and call site). Three behavioral changes come
+> with it: the toast **entrance now eases out** rather than travelling and
+> fading linearly (§5's own word, encoded upstream as `motion::ease_out`,
+> shared by the slide and the fade); the notification centre's **header row
+> is `sizes.hit_target_bar` (40) instead of `sizes.list_row` (38)**, per the
+> tag's style guide, so the centre is 2 px taller; and the toast stack's
+> **redraw cadence is `motion.frame`** rather than a local 32 ms `const`,
+> which is why `toast::Toasts::subscription` now takes `&Theme`. Nothing
+> else moved — the other six adoptions are the same recipes, called
+> upstream instead of copied locally.
+>
+> Stage 10 closed out v0.1:
 > `docs/REVIEW-v0.1.md` is the review (silent-failure audit, spec-conformance
 > pass, packaging review); `docs/UPSTREAM-THEME-DEBT.md` is finalized with a
 > ready-to-send message for the still-unreachable `saola-theme` session;

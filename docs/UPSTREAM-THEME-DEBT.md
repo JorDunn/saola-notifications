@@ -12,7 +12,10 @@ None of these should block a `saola-notifications` release — they exist so
 a `saola-theme` release can pick them up deliberately, not rediscover them
 as regressions.
 
-Pinned tag at the time of writing: `saola-theme-v0.13.0`.
+Pinned tag at the time of writing: `saola-theme-v0.13.0`. **All nine gaps
+below are closed as of 2026-09-06** — the pin is now `saola-theme-v0.14.0`.
+See the "Closed" section at the end of this file. The table stays as the
+historical record of what was missing and what stood in for it.
 
 | Date | Gap | Local workaround | `saola-theme` session notified? |
 | --- | --- | --- | --- |
@@ -94,11 +97,13 @@ under what names, is Jordan's call; the session will reply with the
 release tag once any land. Its `main` also carries an unreleased commit
 adding `Icon::{Power, RotateCw, Moon, UserRound}` for the greeter, which
 touches nothing listed here. Keep the `v0.13.0` pin until a tag arrives.
+(That tag arrived on 2026-09-06 — see "Closed" below.)
 
 ### Ready-to-send message
 
-Paste this to a `saola-theme` session the moment one is reachable
-(`SendMessage`, found via `ListAgents`):
+**Historical — sent on 2026-09-03, and answered by `saola-theme-v0.14.0`.**
+Kept for the record. Paste this to a `saola-theme` session the moment one is
+reachable (`SendMessage`, found via `ListAgents`):
 
 > `saola-notifications` v0.1 carries nine recorded gaps against
 > `saola-theme-v0.13.0` (the pinned tag), each with a token-only local
@@ -138,3 +143,75 @@ Paste this to a `saola-theme` session the moment one is reachable
 > No action needed beyond acknowledging receipt if you're picking any of
 > these up — every workaround already in place is token-only, so there's no
 > urgency, just a backlog worth clearing when saola-theme next has room.
+
+## Closed — 2026-09-06, `saola-theme-v0.14.0`
+
+`saola-theme` released the answer to all nine gaps in one tag. The pin in
+`Cargo.toml` moved from `saola-theme-v0.13.0` to **`saola-theme-v0.14.0`**
+(crate version `0.14.0`, on `saola-tokens 0.8.0`, commit `55b69dd`),
+verified before the bump the way the theme-gap protocol's last step
+requires: `git tag --sort=-v:refname` in the `saola-theme` checkout lists
+the tag, `git show saola-theme-v0.14.0:crates/saola-theme/Cargo.toml`
+reports `version = "0.14.0"`, and every API named below was read at that
+tag before it was called. **Every local workaround the table above records
+is deleted.**
+
+| Gap | API adopted at `saola-theme-v0.14.0` | Call site now |
+| --- | --- | --- |
+| 1. Urgent notification card | `style::container::notification_card_urgent(t, alpha)` | `modules/toast.rs::card_view` (the `Urgency::Critical` arm). Local `urgent_card_style` deleted; the tag's helper is the same recipe (ink surface + popover shadow + `accent_ring`, every color alpha-scaled). |
+| 2. `alpha` on the card's inner chrome | `style::notification::{icon_tile, life_rule}(t, alpha)` — signature changed in place | `modules/toast.rs::icon_tile` and `modules/toast.rs::life_rule`. Local `tile_style` and `life_rule_style` deleted. |
+| 3. Rest span as a parameter | `motion::toast_alpha_over(t, rest_ms, elapsed)` and `motion::life_fraction_over(t, rest_ms, elapsed)` | `modules/toast.rs::{card_alpha, life_fraction}`, now thin adapters: `ExpiryPolicy::After(rest)` becomes `rest_ms`, and `ExpiryPolicy::Never` (which the theme cannot express) stays a local arm that plays the theme's entrance and then holds. |
+| 4. Screen-edge inset | `sizes.shell_edge_gap` (26.0) | `main.rs::toast_surface_settings`, `main.rs::centre_surface_settings`, the `CentreClamp` log line, and the doc comments in both files that named `sizes.panel_margin_islands`. |
+| 5. Redraw cadence | `motion.frame` (`u32`, 32 ms) | `modules/toast.rs::redraw_interval`, read by `Toasts::subscription`. The `REDRAW_INTERVAL` const is deleted; the subscription now takes `&Theme` (`main.rs` passes `&self.theme`, the same way `view` already gets it) rather than storing a copy of the theme on the module. |
+| 6. Easing helper | `motion::ease_out(f)` | `modules/toast.rs::slide_offset`. The slide and the fade now share one curve — the theme's own `toast_alpha_over` eases its entrance too. |
+| 7. Alpha-aware action pill | `widget::pill_button_faded(t, s, c, label, on_press, emphasized, alpha)` (over `style::button::{rest_faded, emphasis_faded}`) | `modules/toast.rs::pills_row`. Local `action_pill` and `action_pill_style` deleted. The widget's geometry fits as-is — it is the same `sizes.hit_target_bar` height and `paddings.pill_button` inset the local copy reproduced — so the widget is called, not the style helpers; `emphasized: false` is the ivory "Secondary" pill §6 asks for. |
+| 8. Fixed-height empty state | `widget::empty_state_row(t, s, message)` | `modules/centre.rs::Centre::view`. The hand-rolled fixed-height container around `widget::empty_state` is deleted. The row is `sizes.list_row` tall (it is built on `widget::list_row_container`, verified at the tag), which is exactly what `centre_height` budgets for it — so that one term still names `list_row`, not a centre token. |
+| 9. Notification centre rhythm | `sizes.notification_centre_padding` (20.0), `sizes.notification_centre_group_gap` (10.0), `sizes.notification_centre_row` (38.0) | `modules/centre.rs::{centre_height, group_height, Centre::view}`. |
+
+### Gap 9, honestly
+
+The three new tokens are **value-aliases** of the generic tokens this crate
+was already using: `notification_centre_padding` is 20.0 like
+`popover_padding`, `notification_centre_group_gap` is 10.0 like
+`island_gap`, and `notification_centre_row` is 38.0 like `list_row`. So
+adopting them changes no pixel today. What it buys is what the gap asked
+for: §6 now *states* the centre's rhythm in tokens of its own, so a second
+consumer of the same shape reads the same three names, and the two surfaces
+move together if those numbers ever diverge.
+
+One thing did move. The tag's style guide adds: "The header row holds the
+title and the do-not-disturb toggle. It is `sizes.hit_target_bar` tall."
+This crate built that row from `widget::list_row_container`
+(`sizes.list_row`, 38). It is now `sizes.hit_target_bar` (40) in **both**
+`header_row`'s view and `centre_height`'s arithmetic, so **the notification
+centre is 2 px taller than it was**. That is a real, intended visual change,
+not a rounding artifact.
+
+Two more terms of the centre's arithmetic deliberately keep their generic
+tokens, and both are recorded here so they are not read as oversights:
+
+- The centre's **horizontal** padding is still `sizes.island_gap`. It is
+  derived, not chosen: `notification_centre_width` (460) minus
+  `notification_card_width` (440) is exactly two `island_gap`s, which is
+  what makes a card land at its natural width with nothing to clip. Only
+  the vertical padding is `notification_centre_padding`.
+- The gap between a group's header and its cards is still
+  `sizes.gap_tight`. §6's three centre tokens cover the outer padding, the
+  gap *between groups*, and a row's height — not the inside of a group.
+
+### The vendored style guide
+
+`docs/SAOLA-STYLE-GUIDE.md` is re-vendored byte-identically from
+`design/SAOLA-STYLE-GUIDE.md` at the same tag (PLAN.md Stage 1 task 7 makes
+that a standing rule). It has to be: the header-row height above is spec,
+and the copy this repo carried was written before the tag stated it. The
+refresh also brings §5's new "an animated surface redraws on `motion.frame`
+(32ms)" line, §6's three centre tokens, `sizes.shell_edge_gap` named in the
+popover and centre sections, and — unrelated to this crate — a rewritten
+Greeter row in §7's surface inventory.
+
+### What is left
+
+Nothing on this side. `Avatar::resolve` is the tag's one breaking change
+(it gained a `max_bytes: u64` parameter); this crate never calls it, so
+there was nothing to migrate.
