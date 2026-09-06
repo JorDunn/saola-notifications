@@ -215,3 +215,14 @@ Greeter row in §7's surface inventory.
 Nothing on this side. `Avatar::resolve` is the tag's one breaking change
 (it gained a `max_bytes: u64` parameter); this crate never calls it, so
 there was nothing to migrate.
+
+## Open — 2026-09-06, surfaced by the v0.14.0 adoption
+
+Two small gaps the bump itself exposed. Both are worked around with
+existing tokens today, neither blocks anything, and both were sent to the
+`saola-theme` session on 2026-09-06 (protocol steps 1 and 2).
+
+| Gap | What stands in for it | Wanted |
+| --- | --- | --- |
+| No `hit_target_bar`-tall row container. §6 now states the centre header row is `sizes.hit_target_bar` tall, but `widget::list_row_container` hardwires `sizes.list_row` and has no twin. | `modules/centre.rs::header_row` builds the band by hand: `container(...).height(hit_target_bar).align_y(Center)`. | A `widget::bar_row_container(t, content)`, or a height parameter on `list_row_container`. |
+| The three `notification_centre_*` tokens stop at the group boundary. The gap between a group's header and its cards, and the centre's horizontal padding, are not named. | `sizes.gap_tight` for the in-group gap; `sizes.island_gap` for the horizontal padding (derived: 460 − 440 = two island gaps). | Either two more centre tokens, or a sentence in §6 stating that recipe so a second consumer does not re-derive it. |
