@@ -1345,7 +1345,15 @@ mod tests {
                 // Longest side (100) scales to 36; the shorter side (50)
                 // scales by the same factor: 50 * 0.36 = 18.
                 assert_eq!((width, height), (36, 18));
-                assert!(pixels.chunks_exact(4).all(|px| px == [200, 100, 50, 255]));
+                // `as_chunks::<4>().0` is the RGBA quads; the `.1` remainder
+                // is empty for any well-formed RGBA buffer.
+                assert!(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|px| *px == [200, 100, 50, 255])
+                );
             }
             other => panic!("expected Handle::Rgba, got {other:?}"),
         }

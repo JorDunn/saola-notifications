@@ -1356,7 +1356,14 @@ impl NotifyRequest {
 /// pill with no text on it is worse than a missing pill, and inventing a
 /// label would put words in the sending application's mouth.
 fn unpack_actions(flat: &[String]) -> Vec<store::Action> {
-    flat.chunks_exact(2)
+    // `as_chunks::<2>()` returns a `(&[[String; 2]], &[String])` pair: the
+    // complete pairs, then the remainder. Taking `.0` and ignoring `.1` is
+    // exactly the "drop a trailing unpaired key" rule above. Each `pair` is a
+    // fixed-size array rather than a slice, so the indexing below cannot
+    // panic.
+    flat.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| store::Action {
             key: pair[0].clone(),
             label: pair[1].clone(),
