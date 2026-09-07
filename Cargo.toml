@@ -1,6 +1,6 @@
 [package]
 name = "saola-notifications"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Notification daemon, toast popups and notification centre for the Saola desktop environment"
 license = "MIT OR Apache-2.0"
