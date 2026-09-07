@@ -81,7 +81,7 @@ Terracotta needs exactly two variants:
 There is exactly one exception to "three colours, never a fourth", added deliberately on
 **2026-07-31** and scoped as narrowly as it is written here.
 
-The panel shows the state of each running Claude Code session as a **16px round dot on
+The panel shows the state of each running **agent** session as a **16px round dot on
 ink**. That readout has five mutually exclusive states, and they must be legible
 *pre-attentively* — you read the bar out of the corner of your eye, without stopping to
 read words. Ivory-versus-terracotta can say "live / not live"; it cannot say
@@ -90,7 +90,7 @@ five hues of its own.
 
 | Token | Hex | State | Motion |
 |---|---|---|---|
-| `status-working` | `#DDA23F` | Claude is generating. | Breathes |
+| `status-working` | `#DDA23F` | The agent is generating. | Breathes |
 | `status-subagents` | `#A481C7` | Subagents are running under the session. | Breathes |
 | `status-attention` | `#D0544A` | Blocked on you — a prompt, a permission, a question. | Steady |
 | `status-done` | `#6D9EC6` | Finished; output awaiting review. | Steady |
@@ -118,6 +118,13 @@ from the other four, and stays in the muted warm register beside ivory and terra
 none of them is a saturated OS-notification hue. `status-working` is held at least ΔE 20
 away from both `accent` and `accent-light` so a working dot is never read as ordinary
 accent text on the same bar.
+
+**Widened to a second agent (2026-08-14):** the panel now runs a Claude Code island and
+an Antigravity (`agy`) island side by side, and both feed this same semaphore — the
+scope above reads "agent session" rather than "Claude Code session" for exactly that
+reason. This is a rewording, not a reopening: the five hexes, the breathing/steady split,
+and all three scope bullets are unchanged. A second signal source earns no colour of its
+own; it draws from the same five states everything else here already does.
 
 ---
 
@@ -389,12 +396,20 @@ from an app already on screen replaces its card and resets the clock.
 reaches full height when there is enough to show.** Grouped by application, each group
 collapsible, with a count chip.
 
-The canonical vertical rhythm uses three tokens. `sizes.notification_centre_padding`
-sets the outer padding. `sizes.notification_centre_group_gap` sets the gap between app
-groups. `sizes.notification_centre_row` sets the height of one card or entry row. A
-second consumer of this shape — a panel indicator popover, or a settings preview —
-should use the same three tokens. This keeps the two surfaces in step. The header row
-holds the title and the do-not-disturb toggle. It is `sizes.hit_target_bar` tall.
+The canonical vertical rhythm uses four tokens. `sizes.notification_centre_padding`
+sets the outer vertical padding. `sizes.notification_centre_group_gap` sets the gap
+between app groups. `sizes.notification_centre_card_gap` sets the gap inside a group,
+between its header and its cards and between the cards. `sizes.notification_centre_row`
+sets the height of one card or entry row. A second consumer of this shape — a panel
+indicator popover, or a settings preview — should use the same four tokens. This keeps
+the two surfaces in step. The header row holds the title and the do-not-disturb toggle.
+It is `sizes.hit_target_bar` tall; `widget::bar_row_container` is that band.
+
+The horizontal padding is not a centre token. It is `sizes.island_gap`, by derivation:
+the centre is `sizes.notification_centre_width` wide, a card is
+`sizes.notification_card_width` wide, and the difference is two island gaps. A token
+that pinned the number would drift if either width changed, so the recipe is stated
+here instead.
 
 ---
 

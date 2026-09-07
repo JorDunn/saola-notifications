@@ -3003,8 +3003,8 @@ dependencies = [
 
 [[package]]
 name = "saola-theme"
-version = "0.14.0"
-source = "git+https://github.com/JorDunn/saola-theme?tag=saola-theme-v0.14.0#55b69dd61de525a8ab43e5a3a0229a7156e74b59"
+version = "0.15.0"
+source = "git+https://github.com/JorDunn/saola-theme?tag=saola-theme-v0.15.0#3f75eb47957ea253af6eb95d8ea5d2bb4b2ad61c"
 dependencies = [
  "iced",
  "saola-tokens",
@@ -3013,8 +3013,8 @@ dependencies = [
 
 [[package]]
 name = "saola-tokens"
-version = "0.8.0"
-source = "git+https://github.com/JorDunn/saola-theme?tag=saola-theme-v0.14.0#55b69dd61de525a8ab43e5a3a0229a7156e74b59"
+version = "0.9.0"
+source = "git+https://github.com/JorDunn/saola-theme?tag=saola-theme-v0.15.0#3f75eb47957ea253af6eb95d8ea5d2bb4b2ad61c"
 dependencies = [
  "serde",
  "thiserror 2.0.20",

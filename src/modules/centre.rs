@@ -103,8 +103,9 @@ pub fn group_history(store: &Store) -> Vec<Group<'_>> {
 
 /// One group's block height: its header row (`sizes.notification_centre_row`
 /// — §6's "the height of one card or entry row" for this surface), plus (when
-/// the group is expanded) every card and the `sizes.gap_tight` that separates
-/// each card from what is above it.
+/// the group is expanded) every card and the
+/// `sizes.notification_centre_card_gap` that separates each card from what is
+/// above it.
 ///
 /// A collapsed group is exactly its header — that is the whole point of
 /// collapsing it, and it is what lets a user shrink an overflowing centre
@@ -117,7 +118,9 @@ pub fn group_height(theme: &Theme, group: &Group<'_>) -> f32 {
     let cards: f32 = group
         .notifications
         .iter()
-        .map(|notification| theme.sizes.gap_tight + toast::card_height(theme, notification))
+        .map(|notification| {
+            theme.sizes.notification_centre_card_gap + toast::card_height(theme, notification)
+        })
         .sum();
     header + cards
 }
@@ -474,12 +477,14 @@ impl Centre {
 ///
 /// §6 (as of the `saola-theme-v0.14.0` style guide) states that height for
 /// this row by name: "The header row holds the title and the do-not-disturb
-/// toggle. It is `sizes.hit_target_bar` tall." It used to be
-/// [`saola_theme::widget::list_row_container`]'s `sizes.list_row` (38) —
-/// two pixels shorter — which is why this builds its own band rather than
-/// borrowing that helper: `list_row_container` hardwires `list_row`, as it
-/// should, and this row is not a list row. [`centre_height`] budgets the
-/// same token.
+/// toggle. It is `sizes.hit_target_bar` tall." `saola-theme-v0.15.0` then
+/// added [`saola_theme::widget::bar_row_container`] — the
+/// `hit_target_bar`-tall twin of `list_row_container` — for exactly this
+/// band, so the hand-built container this row used to need (there was no
+/// helper for a band that isn't `list_row` tall) is gone; the row still owns
+/// its own horizontal `island_gap` padding, since the helper is pure
+/// vertical geometry and takes none of its own. [`centre_height`] budgets
+/// the same `hit_target_bar` token.
 fn header_row<'a>(theme: &Theme, dnd_manual: bool) -> Element<'a, Message> {
     let toggle = row![
         saola_theme::widget::text::body(theme, Surface::Ink, "Do not disturb"),
@@ -497,15 +502,15 @@ fn header_row<'a>(theme: &Theme, dnd_manual: bool) -> Element<'a, Message> {
     ]
     .align_y(iced::Center);
 
-    container(content)
-        .height(Length::Fixed(theme.sizes.hit_target_bar))
-        .align_y(iced::Center)
+    saola_theme::widget::bar_row_container(theme, content)
         .padding([0.0, theme.sizes.island_gap])
         .into()
 }
 
 /// One application's block: the theme's own group-header row (label, count
-/// chip, chevron) and, unless the group is collapsed, its cards.
+/// chip, chevron) and, unless the group is collapsed, its cards, spaced by
+/// `sizes.notification_centre_card_gap` — §6's in-group rhythm, header to
+/// first card and card to card.
 fn group_block<'a>(theme: &Theme, group: &Group<'a>) -> Element<'a, Message> {
     let mut block = column![saola_theme::widget::group_header(
         theme,
@@ -514,7 +519,7 @@ fn group_block<'a>(theme: &Theme, group: &Group<'a>) -> Element<'a, Message> {
         group.collapsed,
         Some(Message::ToggleGroup(group.app_name.to_string())),
     )]
-    .spacing(theme.sizes.gap_tight);
+    .spacing(theme.sizes.notification_centre_card_gap);
 
     if !group.collapsed {
         for notification in &group.notifications {
@@ -691,9 +696,9 @@ mod tests {
     }
 
     /// One group replaces the empty-state row with a
-    /// `notification_centre_row` group header, its `gap_tight`-separated
-    /// card, and the clear-all row (`hit_target_bar`) under one more
-    /// `notification_centre_group_gap`.
+    /// `notification_centre_row` group header, its
+    /// `notification_centre_card_gap`-separated card, and the clear-all row
+    /// (`hit_target_bar`) under one more `notification_centre_group_gap`.
     #[test]
     fn one_group_of_one_adds_its_header_its_card_and_the_clear_all_row() {
         let theme = theme();
@@ -705,7 +710,7 @@ mod tests {
             + theme.sizes.notification_centre_group_gap;
         let expected = empty_chrome
             + theme.sizes.notification_centre_row
-            + theme.sizes.gap_tight
+            + theme.sizes.notification_centre_card_gap
             + toast::card_height(&theme, groups[0].notifications[0])
             + theme.sizes.notification_centre_group_gap
             + theme.sizes.hit_target_bar;
@@ -742,7 +747,7 @@ mod tests {
         let cards: f32 = group_history(&store)[0]
             .notifications
             .iter()
-            .map(|n| theme.sizes.gap_tight + toast::card_height(&theme, n))
+            .map(|n| theme.sizes.notification_centre_card_gap + toast::card_height(&theme, n))
             .sum();
         assert_eq!(expanded - collapsed, cards);
         assert!(collapsed < expanded);

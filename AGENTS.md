@@ -15,7 +15,7 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 
 > Status: **v0.1 feature-complete, reviewed.**
 >
-> **2026-09-06 — the theme pin is `saola-theme-v0.14.0`.** That tag closes
+> **2026-09-06 — the theme pin is `saola-theme-v0.15.0`.** That tag closes
 > all nine gaps `docs/UPSTREAM-THEME-DEBT.md` recorded against v0.13.0, and
 > every local workaround for them is deleted (see that file's "Closed"
 > section for the per-gap API and call site). Three behavioral changes come
@@ -28,6 +28,17 @@ stage and says so in its handoff. A stale AGENTS.md is a bug.
 > which is why `toast::Toasts::subscription` now takes `&Theme`. Nothing
 > else moved — the other six adoptions are the same recipes, called
 > upstream instead of copied locally.
+>
+> **2026-09-06 (later) — bumped again to `saola-theme-v0.15.0`,** closing
+> the two follow-up gaps the v0.14.0 adoption itself surfaced:
+> `modules/centre.rs::header_row` now builds its band with the tag's
+> `widget::bar_row_container(t, content)` instead of a hand-rolled
+> `container(...).height(hit_target_bar)`, and the centre's in-group
+> rhythm (`group_height`'s per-card gap, and `group_block`'s header-to-card
+> spacing) now names `sizes.notification_centre_card_gap` instead of the
+> generic `sizes.gap_tight`. **No pixel moved** — both tokens are 4.0 — this
+> only gives the in-group gap its own name so a second consumer of the
+> centre's shape does not have to guess which generic token it borrowed.
 >
 > Stage 10 closed out v0.1:
 > `docs/REVIEW-v0.1.md` is the review (silent-failure audit, spec-conformance

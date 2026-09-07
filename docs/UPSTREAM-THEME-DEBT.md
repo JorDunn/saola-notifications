@@ -245,4 +245,37 @@ on the next release-plz tag, read from the commit itself:
   `widget::bar_row_container` as the header band, so re-vendor
   `docs/SAOLA-STYLE-GUIDE.md` from the tag when bumping.
 
-Do not pin until the tag exists (AGENTS.md: tags only, never `main`).
+## Closed — 2026-09-06, `saola-theme-v0.15.0`
+
+The tag arrived: `saola-theme-v0.15.0` (crate version `0.15.0`, on
+`saola-tokens 0.9.0`, commit `3f75eb4`) carries commit `ac6c9b8` verbatim.
+`Cargo.toml`'s pin moved from `saola-theme-v0.14.0` to `saola-theme-v0.15.0`,
+verified the same way the two previous bumps were: `git tag
+--sort=-v:refname` in the `saola-theme` checkout lists the tag, and `git
+show saola-theme-v0.15.0:crates/saola-theme/Cargo.toml` reports
+`version = "0.15.0"`. Both gaps above are closed:
+
+| Gap | API adopted at `saola-theme-v0.15.0` | Call site now |
+| --- | --- | --- |
+| No `hit_target_bar`-tall row container | `widget::bar_row_container(t, content)` | `modules/centre.rs::header_row`. The hand-built `container(...).height(hit_target_bar).align_y(Center)` band is gone; the row still owns its own horizontal `island_gap` padding, which the helper does not supply. |
+| In-group rhythm unnamed | `sizes.notification_centre_card_gap` (4.0) | `modules/centre.rs::group_height` (the per-card gap in the sum) and `modules/centre.rs::group_block` (the column spacing between a group's header and its cards). Replaces `sizes.gap_tight`, which was also 4.0 — no pixel moved. |
+
+The horizontal padding stays `sizes.island_gap` by design, as the update
+above already said it would; §6 now states that derivation in prose instead
+of a fourth token.
+
+`docs/SAOLA-STYLE-GUIDE.md` is re-vendored byte-identically from
+`design/SAOLA-STYLE-GUIDE.md` at `saola-theme-v0.15.0` (confirmed with
+`cmp`). Beyond §6 (the four-token rhythm, `bar_row_container`, and the
+horizontal-padding derivation), the only other change in the tag is a
+rewording in the panel's status-semaphore section (§4-ish, "Claude Code
+session" → "agent session", for the Antigravity island) — unrelated to
+this crate.
+
+Nothing is open on this side. `docs/UPSTREAM-THEME-DEBT.md` has no
+outstanding gaps as of this bump.
+
+The tag has arrived: `saola-theme-v0.15.0` exists and is pinned above. The
+"do not pin until the tag exists" instruction that used to close this
+section no longer applies — it was about `main` commit `ac6c9b8`, before a
+release tag carried it.
